@@ -17,6 +17,7 @@
 - [x] **6. Wi-Fi Repeater (STA + AP Concurrency)**
 - [x] **7. MediaTek Diagnostic Backdoors & Hardware Commands (`priv_driver_cmds`)**
 - [x] **8. Native Network & Routing Daemons (`dnsmasq`, `iptables`, `tcpdump`)**
+- [x] **9. Raw Packet Injection Analysis (Monitor Mode vs. `nl80211 mgmt_tx`)**
 
 ---
 
@@ -133,4 +134,28 @@
   - **Access Point Daemon:** `/vendor/bin/hw/hostapd` (v2.10-devel).
 - **Observed Behavior:**  
   A standalone Python/Shell framework can run 100% self-contained on this device with zero external package dependencies.
+
+---
+
+### 9. Raw Packet Injection Analysis (Monitor Mode vs. `nl80211 mgmt_tx`)
+- **Status:** `[x] COMPLETED & REVERSED`
+- **Findings:**
+  1. **`radiotap0` Interface is RX-Only (Sniffer Tap):**
+     - Tracked down `wlanMonWorkHandler` (`0x65984`) where `radiotap0` is allocated and its `net_device_ops` is assigned at offset `0x1f0`.
+     - Parsed the ELF relocation table (`.rela.rodata`):
+       ```text
+       0x1590 (.rodata + 0x10): ndo_open  -> 0x697a8 (wlanMonNetOpen)
+       0x1598 (.rodata + 0x18): ndo_stop  -> 0x69804 (wlanMonNetStop)
+       0x15a0 (.rodata + 0x20): ndo_start_xmit -> NULL (0x0)
+       ```
+     - MediaTek intentionally set `ndo_start_xmit = NULL` for `radiotap0`.
+     - Furthermore, `radiotap0` operates with `carrier = 0` (`NO-CARRIER`). Raw frames sent to `radiotap0` via `AF_PACKET` socket are dropped by the kernel `qdisc` layer before transmission (`TX: 0 packets`).
+  2. **Supported Injection Paths in Hardware/Driver:**
+     - **Management Frame Injection via `nl80211` (`NL80211_CMD_FRAME`):**
+       MediaTek implements `_mtk_cfg80211_mgmt_tx` (`0xbbdb8`), which connects to the kernel `cfg80211_ops->mgmt_tx` callback. User-space daemons can inject raw 802.11 Action, Probe, Auth, and Deauth frames through `nl80211`.
+     - **Driver Disassociation Backdoor:**
+       `priv_driver_set_ap_sta_disassoc` allows direct client deauthentication/kick from userspace via `wpa_cli driver "DISASSOC <mac>"`.
+  3. **Path to Enable Raw Injection on `radiotap0` (Binary Patch):**
+     - Patch `wlan_mon_netdev_ops` at `.rodata + 0x15a0` to point to `wlanHardStartXmit` (or a custom trampoline to `nicTxDirectStartXmit`).
+     - In `wlanMonWorkHandler`, call `netif_carrier_on(prMonDevHandler)` to bring the carrier state to `1` (UP).
 
