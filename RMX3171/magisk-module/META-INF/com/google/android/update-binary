@@ -1,0 +1,14 @@
+#!/sbin/sh
+#################
+# Magisk Module Installer Script
+#################
+OUTFD=$2
+ZIPFILE=$3
+
+if [ -f /data/adb/magisk/magisk ]; then
+    exec /data/adb/magisk/magisk --install-module "$ZIPFILE"
+fi
+
+# Fallback for recovery environments
+echo "[-] Please flash this module inside the Magisk App or via 'magisk --install-module'."
+exit 1

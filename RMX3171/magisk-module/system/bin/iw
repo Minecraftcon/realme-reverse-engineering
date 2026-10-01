@@ -3,6 +3,8 @@
 # Bridges MediaTek gen4m driver OIDs to standard Linux wireless interface syntax
 # Reverse-engineered for Realme Narzo 30A (RMX3171)
 
+export PATH="/data/data/com.termux/files/usr/bin:/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin:$PATH"
+
 BIN_DIR="$(dirname "$0")"
 if [ -x "$BIN_DIR/iw.real" ]; then
     REAL_IW="$BIN_DIR/iw.real"
@@ -36,7 +38,11 @@ fi
 if [ "$ARGS" = "dev" ] || [ "$ARGS" = "" ]; then
     out=$("$REAL_IW" dev 2>/dev/null)
     echo "$out"
-    if ip link show wlan0mon >/dev/null 2>&1 || ip link show radiotap0 >/dev/null 2>&1; then
+    if ip link show mon0 >/dev/null 2>&1; then
+        echo "	Interface mon0"
+        echo "		type monitor"
+        echo "		wiphy 0"
+    elif ip link show wlan0mon >/dev/null 2>&1 || ip link show radiotap0 >/dev/null 2>&1; then
         echo "	Interface wlan0mon"
         echo "		type monitor"
         echo "		wiphy 0"

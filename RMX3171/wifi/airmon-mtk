@@ -3,9 +3,11 @@
 # Target Device: Realme Narzo 30A (RMX3171 / MT6768 Helio G85)
 # Reverse-engineered by Shado & Antigravity (2026)
 
+export PATH="/data/data/com.termux/files/usr/bin:/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin:$PATH"
+
 WPA_SOCKET_DIR="/data/vendor/wifi/wpa/sockets"
 IFACE="wlan0"
-MON_IFACE="radiotap0"
+MON_IFACE="mon0"
 HOP_PID_FILE="/data/local/tmp/airmon_mtk_hop.pid"
 
 check_root() {
@@ -17,7 +19,9 @@ check_root() {
 
 send_driver_cmd() {
     local cmd="$1"
-    wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "$cmd" 2>/dev/null
+    local wpa_bin
+    wpa_bin=$(command -v wpa_cli 2>/dev/null || echo "/vendor/bin/wpa_cli")
+    "$wpa_bin" -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "$cmd" 2>/dev/null
 }
 
 stop_hopper() {
@@ -40,14 +44,41 @@ start_monitor() {
 
     stop_hopper
 
-    local res
-    res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
+    # Check if wpa_supplicant socket is present; if not, auto-enable Wi-Fi
+    if [ ! -S "$WPA_SOCKET_DIR/$IFACE" ]; then
+        echo "[*] Wi-Fi control socket not found. Enabling Wi-Fi..."
+        svc wifi enable >/dev/null 2>&1
+        local tries=0
+        while [ $tries -lt 10 ]; do
+            if [ -S "$WPA_SOCKET_DIR/$IFACE" ]; then break; fi
+            sleep 0.5
+            tries=$((tries + 1))
+        done
+    fi
+
+    local res=""
+    local retries=5
+    while [ $retries -gt 0 ]; do
+        res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
+        if [ "$res" = "OK" ]; then break; fi
+        sleep 0.5
+        retries=$((retries - 1))
+    done
     if [ "$res" != "OK" ]; then
         echo "[-] Driver command returned: '$res'. Make sure Wi-Fi is enabled." >&2
         return 1
     fi
 
-    # Bring up radiotap0
+    # Detect created monitor interface (mon0, wlan0mon, or radiotap0)
+    if ip link show mon0 >/dev/null 2>&1; then
+        MON_IFACE="mon0"
+    elif ip link show wlan0mon >/dev/null 2>&1; then
+        MON_IFACE="wlan0mon"
+    else
+        MON_IFACE="radiotap0"
+    fi
+
+    # Bring up monitor interface
     ip link set "$MON_IFACE" up 2>/dev/null
     sleep 0.2
 
@@ -65,8 +96,10 @@ stop_monitor() {
     stop_hopper
 
     send_driver_cmd "MONITOR 0" >/dev/null 2>&1
-    ip link set "$MON_IFACE" down 2>/dev/null
-    echo "[+] Monitor mode disabled. $MON_IFACE is down."
+    ip link set "mon0" down >/dev/null 2>&1
+    ip link set "wlan0mon" down >/dev/null 2>&1
+    ip link set "radiotap0" down >/dev/null 2>&1
+    echo "[+] Monitor mode disabled."
 }
 
 set_channel() {
@@ -107,23 +140,41 @@ start_hopper() {
 }
 
 sniff_packets() {
+    local mon_dev="mon0"
+    if ip link show mon0 >/dev/null 2>&1; then
+        mon_dev="mon0"
+    elif ip link show wlan0mon >/dev/null 2>&1; then
+        mon_dev="wlan0mon"
+    else
+        mon_dev="radiotap0"
+    fi
+
     local pcap="$1"
     if [ -n "$pcap" ]; then
         echo "[*] Capturing raw 802.11 frames to $pcap (Press Ctrl+C to stop)..."
-        tcpdump -i "$MON_IFACE" -w "$pcap" -s 0
+        tcpdump -i "$mon_dev" -w "$pcap" -s 0
     else
         echo "[*] Streaming live 802.11 management frames (Press Ctrl+C to stop)..."
-        tcpdump -i "$MON_IFACE" -n -e -vv
+        tcpdump -i "$mon_dev" -n -e -vv
     fi
 }
 
 show_status() {
     echo "=== MediaTek Monitor Mode Status ==="
-    if ip link show "$MON_IFACE" >/dev/null 2>&1; then
-        echo "[+] $MON_IFACE exists:"
-        ip link show "$MON_IFACE"
+    local iface_found=""
+    if ip link show mon0 >/dev/null 2>&1; then
+        iface_found="mon0"
+    elif ip link show wlan0mon >/dev/null 2>&1; then
+        iface_found="wlan0mon"
+    elif ip link show radiotap0 >/dev/null 2>&1; then
+        iface_found="radiotap0"
+    fi
+
+    if [ -n "$iface_found" ]; then
+        echo "[+] $iface_found exists:"
+        ip link show "$iface_found"
     else
-        echo "[-] $MON_IFACE is not created."
+        echo "[-] Monitor interface is not created."
     fi
 
     if [ -f "$HOP_PID_FILE" ]; then

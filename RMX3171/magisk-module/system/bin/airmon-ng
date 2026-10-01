@@ -3,6 +3,8 @@
 # Target Device: Realme Narzo 30A (RMX3171 / MT6768 Helio G85)
 # Reverse-engineered by Shado & Antigravity (2026)
 
+export PATH="/data/data/com.termux/files/usr/bin:/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin:$PATH"
+
 WPA_SOCKET_DIR="/data/vendor/wifi/wpa/sockets"
 IFACE="wlan0"
 MON_IFACE="wlan0mon"
@@ -18,7 +20,9 @@ check_root() {
 
 send_driver_cmd() {
     local cmd="$1"
-    wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "$cmd" 2>/dev/null
+    local wpa_bin
+    wpa_bin=$(command -v wpa_cli 2>/dev/null || echo "/vendor/bin/wpa_cli")
+    "$wpa_bin" -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "$cmd" 2>/dev/null
 }
 
 stop_hopper() {
@@ -67,8 +71,14 @@ start_monitor() {
     fi
 
     # Trigger MediaTek monitor mode via driver backdoor
-    local res
-    res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
+    local res=""
+    local retries=5
+    while [ $retries -gt 0 ]; do
+        res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
+        if [ "$res" = "OK" ]; then break; fi
+        sleep 0.5
+        retries=$((retries - 1))
+    done
     if [ "$res" != "OK" ]; then
         echo "[-] Error: Driver command failed. Is Wi-Fi turned on?" >&2
         return 1
@@ -76,10 +86,13 @@ start_monitor() {
 
     sleep 0.2
 
-    # If instantiated as radiotap0, dynamically rename to wlan0mon
+    # If instantiated as radiotap0 or mon0, dynamically rename to wlan0mon
     if ip link show "$RAW_MON" >/dev/null 2>&1; then
         ip link set "$RAW_MON" down 2>/dev/null
         ip link set "$RAW_MON" name "$MON_IFACE" 2>/dev/null
+    elif ip link show mon0 >/dev/null 2>&1; then
+        ip link set mon0 down 2>/dev/null
+        ip link set mon0 name "$MON_IFACE" 2>/dev/null
     fi
 
     # Bring up wlan0mon

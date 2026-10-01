@@ -1,6 +1,6 @@
-id=rmx3171-wifi-enhancer
-name=MediaTek Gen4m Wi-Fi Monitor & Tools (RMX3171)
-version=v1.0.0
-versionCode=100
+id=mtk-aircrack-core
+name=MTK Aircrack Core
+version=v1.1.0
+versionCode=110
 author=Shado & Antigravity
-description=Exposes desktop-style monitor mode (wlan0mon), airmon-ng, airmon-mtk, and channel control shims for MediaTek Helio G85 (wlan_drv_gen4m).
+description=Desktop-grade native monitor mode (mon0), raw 802.11 packet injection engine, and wireless penetration testing shims for MediaTek Helio G85 (wlan_drv_gen4m).

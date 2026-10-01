@@ -1,0 +1,9 @@
+# Binaries & large backups
+RMX3171/boot-backups/
+RMX3171/current_boot.img
+RMX3171/kernel
+RMX3171/dumped-drivers/
+
+# Python cache
+__pycache__/
+*.pyc
