@@ -203,13 +203,16 @@ sniff_packets() {
     iw dev "$IFACE" set power_save off 2>/dev/null
     cmd wifi start-scan >/dev/null 2>&1
 
+    # Trap SIGINT / SIGTERM to ensure child processes are terminated
+    trap 'pkill -P $$ 2>/dev/null; pkill -9 -f "tcpdump -i $mon_dev" 2>/dev/null; exit 0' INT TERM
+
     local pcap="$1"
     if [ -n "$pcap" ]; then
         echo "[*] Capturing raw 802.11 frames to $pcap (Press Ctrl+C to stop)..."
-        tcpdump -i "$mon_dev" -w "$pcap" -s 0
+        exec tcpdump -i "$mon_dev" -w "$pcap" -s 0
     else
         echo "[*] Streaming live 802.11 management frames (Press Ctrl+C to stop)..."
-        tcpdump -i "$mon_dev" -n -e -vv
+        exec tcpdump -i "$mon_dev" -n -e -vv
     fi
 }
 
