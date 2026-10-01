@@ -1,40 +1,124 @@
 #!/bin/sh
 # Smart iw wrapper for MediaTek MT6768 (Helio G85)
-# Catches virtual interface channel tuning and routes to driver OID
+# Bridges MediaTek gen4m driver OIDs to standard Linux wireless interface syntax
+# Reverse-engineered for Realme Narzo 30A (RMX3171)
 
-REAL_IW="/system/bin/iw.real"
+BIN_DIR="$(dirname "$0")"
+if [ -x "$BIN_DIR/iw.real" ]; then
+    REAL_IW="$BIN_DIR/iw.real"
+elif [ -x "/system/bin/iw.real" ]; then
+    REAL_IW="/system/bin/iw.real"
+elif [ -x "/vendor/bin/iw" ]; then
+    REAL_IW="/vendor/bin/iw"
+else
+    REAL_IW="/system/bin/iw"
+fi
 WPA_SOCKET_DIR="/data/vendor/wifi/wpa/sockets"
 IFACE="wlan0"
 
-# Check if command is targeting wlan0mon or radiotap0 for channel setting
-# e.g.: iw dev wlan0mon set channel 6
-#       iw dev radiotap0 set channel 11
-#       iw dev wlan0mon set freq 2437
-if [ "$1" = "dev" ] && { [ "$2" = "wlan0mon" ] || [ "$2" = "radiotap0" ]; }; then
-    if [ "$3" = "set" ] && [ "$4" = "channel" ] && [ -n "$5" ]; then
-        wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "MONITOR 1 $5 20 0" >/dev/null 2>&1
-        exit 0
-    elif [ "$3" = "set" ] && [ "$4" = "freq" ] && [ -n "$5" ]; then
-        # Convert frequency in MHz to 2.4GHz channel number
-        freq="$5"
-        ch=6
-        if [ "$freq" -ge 2412 ] && [ "$freq" -le 2484 ]; then
-            ch=$(( (freq - 2407) / 5 ))
-            if [ "$freq" -eq 2484 ]; then ch=14; fi
-        elif [ "$freq" -ge 5180 ] && [ "$freq" -le 5825 ]; then
-            ch=$(( (freq - 5000) / 5 ))
+# Normalize arguments: if first argument is "dev", strip it
+ARGS="$@"
+FIRST="$1"
+if [ "$FIRST" = "dev" ]; then
+    shift
+    TARGET="$1"
+    CMD="$2"
+    SUB="$3"
+    VAL="$4"
+else
+    TARGET="$1"
+    CMD="$2"
+    SUB="$3"
+    VAL="$4"
+fi
+
+# 1. Handle "iw dev" (interface listing)
+if [ "$ARGS" = "dev" ] || [ "$ARGS" = "" ]; then
+    out=$("$REAL_IW" dev 2>/dev/null)
+    echo "$out"
+    if ip link show wlan0mon >/dev/null 2>&1 || ip link show radiotap0 >/dev/null 2>&1; then
+        echo "	Interface wlan0mon"
+        echo "		type monitor"
+        echo "		wiphy 0"
+    fi
+    exit 0
+fi
+
+# 2. Handle commands targeting virtual monitor interfaces (wlan0mon / radiotap0)
+if [ "$TARGET" = "wlan0mon" ] || [ "$TARGET" = "radiotap0" ] || [ "$TARGET" = "mon0" ]; then
+    case "$CMD" in
+        info)
+            echo "Interface $TARGET"
+            echo "	type monitor"
+            echo "	wiphy 0"
+            exit 0
+            ;;
+        set)
+            case "$SUB" in
+                channel)
+                    if [ -n "$VAL" ]; then
+                        wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "MONITOR 1 $VAL 20 0" >/dev/null 2>&1
+                        exit 0
+                    fi
+                    ;;
+                freq)
+                    if [ -n "$VAL" ]; then
+                        freq="$VAL"
+                        ch=6
+                        if [ "$freq" -ge 2412 ] && [ "$freq" -le 2484 ]; then
+                            ch=$(( (freq - 2407) / 5 ))
+                            if [ "$freq" -eq 2484 ]; then ch=14; fi
+                        elif [ "$freq" -ge 5180 ] && [ "$freq" -le 5825 ]; then
+                            ch=$(( (freq - 5000) / 5 ))
+                        fi
+                        wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "MONITOR 1 $ch 20 0" >/dev/null 2>&1
+                        exit 0
+                    fi
+                    ;;
+                type)
+                    if [ "$VAL" = "managed" ]; then
+                        airmon-ng stop "$TARGET" >/dev/null 2>&1
+                        exit 0
+                    elif [ "$VAL" = "monitor" ]; then
+                        airmon-ng start "$IFACE" >/dev/null 2>&1
+                        exit 0
+                    fi
+                    ;;
+                monitor)
+                    # "set monitor control"
+                    exit 0
+                    ;;
+            esac
+            ;;
+        del)
+            airmon-ng stop "$TARGET" >/dev/null 2>&1
+            exit 0
+            ;;
+    esac
+fi
+
+# 3. Handle commands targeting physical interface (wlan0)
+if [ "$TARGET" = "wlan0" ]; then
+    if [ "$CMD" = "set" ]; then
+        if [ "$SUB" = "type" ] && [ "$VAL" = "monitor" ]; then
+            airmon-ng start wlan0 >/dev/null 2>&1
+            exit 0
+        elif [ "$SUB" = "monitor" ]; then
+            airmon-ng start wlan0 >/dev/null 2>&1
+            exit 0
+        elif [ "$SUB" = "type" ] && [ "$VAL" = "managed" ]; then
+            airmon-ng stop wlan0mon >/dev/null 2>&1
+            exit 0
+        elif [ "$SUB" = "channel" ] && [ -n "$VAL" ]; then
+            if ip link show wlan0mon >/dev/null 2>&1 || ip link show radiotap0 >/dev/null 2>&1; then
+                wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "MONITOR 1 $VAL 20 0" >/dev/null 2>&1
+                exit 0
+            fi
         fi
-        wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "MONITOR 1 $ch 20 0" >/dev/null 2>&1
-        exit 0
-    elif [ "$3" = "info" ]; then
-        echo "Interface $2"
-        echo "	type monitor"
-        echo "	wiphy 0"
-        exit 0
     fi
 fi
 
-# Fallback to genuine iw binary
+# 4. Fallback to genuine iw binary
 if [ -x "$REAL_IW" ]; then
     exec "$REAL_IW" "$@"
 else

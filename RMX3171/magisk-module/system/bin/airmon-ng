@@ -35,7 +35,7 @@ stop_hopper() {
 list_interfaces() {
     echo "PHY	Interface	Driver		Chipset"
     echo "phy0	wlan0		wlan_drv_gen4m	MediaTek MT6768 (Helio G85)"
-    if ip link show "$MON_IFACE" >/dev/null 2>&1; then
+    if ip link show "$MON_IFACE" >/dev/null 2>&1 || ip link show "$RAW_MON" >/dev/null 2>&1; then
         echo "phy0	wlan0mon	wlan_drv_gen4m	MediaTek MT6768 (Monitor VIF)"
     fi
 }
@@ -102,10 +102,12 @@ stop_monitor() {
 
     send_driver_cmd "MONITOR 0" >/dev/null 2>&1
     ip link set "$MON_IFACE" down 2>/dev/null 2>&1
+    ip link set "$RAW_MON" down 2>/dev/null 2>&1
 
     echo "PHY	Interface	Driver		Chipset"
     echo "phy0	$MON_IFACE	wlan_drv_gen4m	MediaTek MT6768 (Helio G85)"
     echo "		(mac80211 monitor mode vif [phy0]$MON_IFACE disabled)"
+    echo "		(mac80211 station mode vif enabled on [phy0]wlan0)"
 }
 
 check_root

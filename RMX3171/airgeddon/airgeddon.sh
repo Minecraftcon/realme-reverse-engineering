@@ -393,6 +393,8 @@ known_arm_compatible_distros=(
 								"Raspberry Pi OS"
 								"Parrot arm"
 								"Kali arm"
+								"Android"
+								"Termux"
 							)
 
 #Sponsors
@@ -1006,6 +1008,13 @@ function check_interface_coherence() {
 	done
 
 	if [ "${interface_found}" -eq 0 ]; then
+		if [[ "${new_interface}" =~ wlan[0-9]*mon|radiotap[0-9]* ]] || [[ "${interface}" =~ wlan[0-9]*mon|radiotap[0-9]* ]]; then
+			interface="${new_interface:-${interface}}"
+			phy_interface="phy0"
+			check_interface_supported_bands "${phy_interface}" "main_wifi_interface"
+			interface_auto_change=1
+			return 0
+		fi
 		if [ -n "${interface_mac}" ]; then
 			for iface_mac in "${ifaces_and_macs[@]}"; do
 				iface_mac_tmp=${iface_mac:0:15}
@@ -3353,7 +3362,7 @@ function select_interface() {
 	current_menu="select_interface_menu"
 	language_strings "${language}" 24 "green"
 	print_simple_separator
-	ifaces=$(ip link | grep -E "^[0-9]+" | cut -d ':' -f 2 | awk '{print $1}' | grep -E "^lo$" -v)
+	ifaces=$(ip link | grep -E "^[0-9]+" | cut -d ':' -f 2 | awk '{print $1}' | grep -E "^(lo|ccmni.*|ifb.*|imq.*|dummy.*|sit.*|ip6.*|ip_.*|tun.*|tap.*)$" -v)
 	option_counter=0
 	for item in ${ifaces}; do
 		option_counter=$((option_counter + 1))
@@ -18358,6 +18367,11 @@ function detect_distro_phase2() {
 		fi
 	fi
 
+	if [ -f "/system/build.prop" ] || [ -d "/data/data/com.termux" ]; then
+		distro="Android"
+		is_arm=1
+	fi
+
 	detect_arm_architecture
 }
 
@@ -19875,6 +19889,12 @@ function initialize_tmux() {
 
 	debug_print
 
+	if [ -n "${TMUX}" ]; then
+		session_name=$(tmux display-message -p '#S' 2>/dev/null)
+		airgeddon_uid="${BASHPID}"
+		return 0
+	fi
+
 	if [ "${1}" = "true" ]; then
 		if [ -n "${2}" ]; then
 			airgeddon_uid="${2}"
@@ -19965,6 +19985,10 @@ function start_tmux_processes() {
 function check_inside_tmux() {
 
 	debug_print
+
+	if [ -n "${TMUX}" ]; then
+		return 0
+	fi
 
 	local parent_pid
 	local parent_window
@@ -20598,9 +20622,11 @@ function autoupdate_check() {
 #Change script language automatically if OS language is supported by the script and different from the current language
 function autodetect_language() {
 
-	debug_print
-
-	[[ $(locale | grep LANG) =~ ^(.*)=\"?([a-zA-Z]+)_(.*)$ ]] && lang="${BASH_REMATCH[2]}"
+	if hash locale 2> /dev/null; then
+		[[ $(locale | grep LANG) =~ ^(.*)=\"?([a-zA-Z]+)_(.*)$ ]] && lang="${BASH_REMATCH[2]}"
+	elif [ -n "${LANG}" ]; then
+		[[ "${LANG}" =~ ^([a-zA-Z]+)_(.*)$ ]] && lang="${BASH_REMATCH[1]}"
+	fi
 
 	for lgkey in "${!lang_association[@]}"; do
 		if [[ "${lang}" = "${lgkey}" ]] && [[ "${language}" != "${lang_association[${lgkey}]}" ]]; then

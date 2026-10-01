@@ -1,5 +1,5 @@
 #Enabled true / Disabled false - Auto update feature (it has no effect on development mode) - Default value true
-AIRGEDDON_AUTO_UPDATE=true
+AIRGEDDON_AUTO_UPDATE=false
 
 #Enabled true / Disabled false - Skip intro (it has no effect on development mode) - Default value false
 AIRGEDDON_SKIP_INTRO=false
@@ -29,7 +29,7 @@ AIRGEDDON_6GHZ_ENABLED=true
 AIRGEDDON_FORCE_IPTABLES=false
 
 #Enabled true / Disabled false - Force to kill Network Manager before launching Evil Twin attacks - Default value true
-AIRGEDDON_FORCE_NETWORK_MANAGER_KILLING=true
+AIRGEDDON_FORCE_NETWORK_MANAGER_KILLING=false
 
 #Available values: mdk3, mdk4 - Define which mdk version is going to be used - Default value mdk4
 AIRGEDDON_MDK_VERSION=mdk4
@@ -41,7 +41,7 @@ AIRGEDDON_PLUGINS_ENABLED=true
 AIRGEDDON_EVIL_TWIN_ESSID_STRIPPING=true
 
 #Enabled true / Disabled false - Enable sounds for Evil Twin attacks - Default value true
-AIRGEDDON_EVIL_TWIN_SOUNDS=true
+AIRGEDDON_EVIL_TWIN_SOUNDS=false
 
 #Enabled true / Disabled false - Development mode for faster development skipping intro and all initial checks - Default value false
 AIRGEDDON_DEVELOPMENT_MODE=false
@@ -50,4 +50,5 @@ AIRGEDDON_DEVELOPMENT_MODE=false
 AIRGEDDON_DEBUG_MODE=false
 
 #Available values: xterm, tmux - Define the needed tool to be used for windows handling - Default value xterm
-AIRGEDDON_WINDOWS_HANDLING=xterm
+AIRGEDDON_WINDOWS_HANDLING=tmux
+

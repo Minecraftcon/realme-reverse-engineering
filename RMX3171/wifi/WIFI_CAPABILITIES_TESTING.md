@@ -18,6 +18,7 @@
 - [x] **7. MediaTek Diagnostic Backdoors & Hardware Commands (`priv_driver_cmds`)**
 - [x] **8. Native Network & Routing Daemons (`dnsmasq`, `iptables`, `tcpdump`)**
 - [x] **9. Raw Packet Injection Analysis (Monitor Mode vs. `nl80211 mgmt_tx`)**
+- [x] **10. Airgeddon Port & Desktop-Style Interface Integration (`wlan0mon`, smart `iw`, `tmux`)**
 
 ---
 
@@ -159,3 +160,33 @@
      - Patch `wlan_mon_netdev_ops` at `.rodata + 0x15a0` to point to `wlanHardStartXmit` (or a custom trampoline to `nicTxDirectStartXmit`).
      - In `wlanMonWorkHandler`, call `netif_carrier_on(prMonDevHandler)` to bring the carrier state to `1` (UP).
 
+
+---
+
+### 10. Airgeddon Port & Desktop-Style Interface Integration
+- **Status:** `[x] COMPLETED & VERIFIED ON HARDWARE`
+- **Mechanism:**
+  - **Toolchain & Binaries Deployed:** Installed `aircrack-ng (3:1.7)`, `libpcap (1.11.0)`, `libnl (3.12.0)`, `pcre (8.45-2)`, `tmux (3.7c-1)`, and `ncurses-utils (6.6)` directly into the device Termux environment.
+  - **Smart `iw` Wrapper (`/data/adb/modules/rmx3171-wifi-enhancer/system/bin/iw`):**
+    - Intercepts nl80211 commands targeting virtual monitor devices (`wlan0mon`, `radiotap0`, `mon0`).
+    - Emulates `iw dev <iface> info` returning `type monitor` and `wiphy 0`.
+    - Synthesizes `Interface wlan0mon` into `iw dev` listings when active.
+    - Translates standard `iw dev <iface> set channel <ch>` into MediaTek driver OIDs (`MONITOR 1 <ch> 20 0`).
+    - Maps `iw <iface> set monitor control` / `iw <iface> set type managed` into `airmon-ng start` / `stop`.
+  - **Driver-Aware `airmon-ng` (`system/bin/airmon-ng`):**
+    - Uses driver OID dispatch while preserving `wpa_supplicant` for command control.
+    - Renames `radiotap0` to standard desktop `wlan0mon`.
+    - Outputs standard aircrack-ng notification strings (`(mac80211 monitor mode vif enabled...)` and `(mac80211 station mode vif enabled on [phy0]wlan0)`) so desktop scripts recognize the interface transition.
+  - **Airgeddon Patches (`airgeddon.sh`):**
+    - `known_arm_compatible_distros`: Added `"Android"` and `"Termux"`.
+    - `detect_distro_phase2`: Automatically identifies Android environment via `/system/build.prop` / `/data/data/com.termux`.
+    - `check_inside_tmux`: Recognizes existing `$TMUX` environment variable to prevent nested session attachment failures.
+    - `check_interface_coherence`: Directly handles transitions between `wlan0` and `wlan0mon` where hardware MAC is `00:00:00:00:00:00`.
+    - `select_interface`: Filters out 30+ internal cellular modem (`ccmni*`), IFB, IMQ, and tunnel interfaces, presenting only genuine wireless interfaces (`wlan0`, `wlan1`, `p2p0`, `ap0`, `wlan0mon`).
+    - `set_chipset`: Automatically detects MediaTek SoC interfaces as `MediaTek MT6768 (Helio G85 gen4m)`.
+    - `.airgeddonrc`: Configured `AIRGEDDON_WINDOWS_HANDLING=tmux`, `AIRGEDDON_AUTO_UPDATE=false`, `AIRGEDDON_FORCE_NETWORK_MANAGER_KILLING=false`.
+- **Observed Behavior:**
+  - Launching `airgeddon-launcher.sh` passes all 9 essential dependency checks (`iw`, `awk`, `airmon-ng`, `airodump-ng`, `aircrack-ng`, `tmux`, `ip`, `lspci`, `ps`).
+  - Displays clean interface selection menu with chipset identification and Wi-Fi 5 band capabilities.
+  - Selecting `wlan0` and choosing Option 2 ("Put interface in monitor mode") successfully initializes `wlan0mon`, autoselects it, and updates Airgeddon's main menu state to `Mode: Monitor`.
+  - Choosing Option 3 ("Put interface in managed mode") successfully restores `wlan0` and updates Airgeddon's main menu state to `Mode: Managed`.
