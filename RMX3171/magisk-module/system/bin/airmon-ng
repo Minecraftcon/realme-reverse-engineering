@@ -1,0 +1,136 @@
+#!/bin/sh
+# airmon-ng: Desktop drop-in replacement for MediaTek gen4m wireless drivers
+# Target Device: Realme Narzo 30A (RMX3171 / MT6768 Helio G85)
+# Reverse-engineered by Shado & Antigravity (2026)
+
+WPA_SOCKET_DIR="/data/vendor/wifi/wpa/sockets"
+IFACE="wlan0"
+MON_IFACE="wlan0mon"
+RAW_MON="radiotap0"
+HOP_PID_FILE="/data/local/tmp/airmon_mtk_hop.pid"
+
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "[-] Error: airmon-ng must be run as root." >&2
+        exit 1
+    fi
+}
+
+send_driver_cmd() {
+    local cmd="$1"
+    wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "$cmd" 2>/dev/null
+}
+
+stop_hopper() {
+    if [ -f "$HOP_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$HOP_PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null
+        fi
+        rm -f "$HOP_PID_FILE"
+    fi
+}
+
+list_interfaces() {
+    echo "PHY	Interface	Driver		Chipset"
+    echo "phy0	wlan0		wlan_drv_gen4m	MediaTek MT6768 (Helio G85)"
+    if ip link show "$MON_IFACE" >/dev/null 2>&1; then
+        echo "phy0	wlan0mon	wlan_drv_gen4m	MediaTek MT6768 (Monitor VIF)"
+    fi
+}
+
+check_kill() {
+    echo "Checking for interfering processes..."
+    echo "PID	Name"
+    local procs
+    procs=$(pgrep -l -f "wpa_supplicant|hostapd" 2>/dev/null)
+    if [ -n "$procs" ]; then
+        echo "$procs"
+        if [ "$1" = "kill" ]; then
+            echo "Killing interfering processes..."
+            pkill -f "hostapd" 2>/dev/null
+            echo "Note: wpa_supplicant is preserved for driver OID dispatch."
+        fi
+    else
+        echo "No interfering processes found."
+    fi
+}
+
+start_monitor() {
+    local target_iface="$1"
+    local channel="${2:-6}"
+    local bw="${3:-20}"
+
+    if [ -z "$target_iface" ]; then
+        target_iface="wlan0"
+    fi
+
+    # Trigger MediaTek monitor mode via driver backdoor
+    local res
+    res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
+    if [ "$res" != "OK" ]; then
+        echo "[-] Error: Driver command failed. Is Wi-Fi turned on?" >&2
+        return 1
+    fi
+
+    sleep 0.2
+
+    # If instantiated as radiotap0, dynamically rename to wlan0mon
+    if ip link show "$RAW_MON" >/dev/null 2>&1; then
+        ip link set "$RAW_MON" down 2>/dev/null
+        ip link set "$RAW_MON" name "$MON_IFACE" 2>/dev/null
+    fi
+
+    # Bring up wlan0mon
+    ip link set "$MON_IFACE" promisc on 2>/dev/null
+    ip link set "$MON_IFACE" up 2>/dev/null
+
+    if ip link show "$MON_IFACE" >/dev/null 2>&1; then
+        echo "PHY	Interface	Driver		Chipset"
+        echo "phy0	$target_iface		wlan_drv_gen4m	MediaTek MT6768 (Helio G85)"
+        echo "		(mac80211 monitor mode vif enabled for [phy0]$target_iface on [phy0]$MON_IFACE)"
+    else
+        echo "[-] Error: Failed to create $MON_IFACE" >&2
+        return 1
+    fi
+}
+
+stop_monitor() {
+    local target_iface="$1"
+    stop_hopper
+
+    send_driver_cmd "MONITOR 0" >/dev/null 2>&1
+    ip link set "$MON_IFACE" down 2>/dev/null 2>&1
+
+    echo "PHY	Interface	Driver		Chipset"
+    echo "phy0	$MON_IFACE	wlan_drv_gen4m	MediaTek MT6768 (Helio G85)"
+    echo "		(mac80211 monitor mode vif [phy0]$MON_IFACE disabled)"
+}
+
+check_root
+
+case "$1" in
+    start)
+        start_monitor "$2" "$3" "$4"
+        ;;
+    stop)
+        stop_monitor "$2"
+        ;;
+    check)
+        check_kill "$2"
+        ;;
+    ""|list)
+        list_interfaces
+        ;;
+    *)
+        echo "Usage: airmon-ng <start|stop|check> <interface> [channel]"
+        echo ""
+        echo "MediaTek Gen4m Shim Commands:"
+        echo "  airmon-ng                      List available wireless interfaces"
+        echo "  airmon-ng check [kill]         Inspect / kill interfering processes"
+        echo "  airmon-ng start wlan0 [ch]     Spawn desktop wlan0mon monitor interface"
+        echo "  airmon-ng stop wlan0mon        Tear down wlan0mon monitor interface"
+        exit 1
+        ;;
+esac

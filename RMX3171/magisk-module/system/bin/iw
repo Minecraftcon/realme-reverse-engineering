@@ -1,0 +1,42 @@
+#!/bin/sh
+# Smart iw wrapper for MediaTek MT6768 (Helio G85)
+# Catches virtual interface channel tuning and routes to driver OID
+
+REAL_IW="/system/bin/iw.real"
+WPA_SOCKET_DIR="/data/vendor/wifi/wpa/sockets"
+IFACE="wlan0"
+
+# Check if command is targeting wlan0mon or radiotap0 for channel setting
+# e.g.: iw dev wlan0mon set channel 6
+#       iw dev radiotap0 set channel 11
+#       iw dev wlan0mon set freq 2437
+if [ "$1" = "dev" ] && { [ "$2" = "wlan0mon" ] || [ "$2" = "radiotap0" ]; }; then
+    if [ "$3" = "set" ] && [ "$4" = "channel" ] && [ -n "$5" ]; then
+        wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "MONITOR 1 $5 20 0" >/dev/null 2>&1
+        exit 0
+    elif [ "$3" = "set" ] && [ "$4" = "freq" ] && [ -n "$5" ]; then
+        # Convert frequency in MHz to 2.4GHz channel number
+        freq="$5"
+        ch=6
+        if [ "$freq" -ge 2412 ] && [ "$freq" -le 2484 ]; then
+            ch=$(( (freq - 2407) / 5 ))
+            if [ "$freq" -eq 2484 ]; then ch=14; fi
+        elif [ "$freq" -ge 5180 ] && [ "$freq" -le 5825 ]; then
+            ch=$(( (freq - 5000) / 5 ))
+        fi
+        wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "MONITOR 1 $ch 20 0" >/dev/null 2>&1
+        exit 0
+    elif [ "$3" = "info" ]; then
+        echo "Interface $2"
+        echo "	type monitor"
+        echo "	wiphy 0"
+        exit 0
+    fi
+fi
+
+# Fallback to genuine iw binary
+if [ -x "$REAL_IW" ]; then
+    exec "$REAL_IW" "$@"
+else
+    exec /system/bin/iw "$@"
+fi

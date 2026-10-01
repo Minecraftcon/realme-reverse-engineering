@@ -1,0 +1,6 @@
+id=rmx3171-wifi-enhancer
+name=MediaTek Gen4m Wi-Fi Monitor & Tools (RMX3171)
+version=v1.0.0
+versionCode=100
+author=Shado & Antigravity
+description=Exposes desktop-style monitor mode (wlan0mon), airmon-ng, airmon-mtk, and channel control shims for MediaTek Helio G85 (wlan_drv_gen4m).
