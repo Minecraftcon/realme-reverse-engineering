@@ -140,18 +140,74 @@ su -c 'wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "MONITOR 1 11 20
 
 #### Step 5: Deactivate Monitor Mode
 ```bash
-su -c 'wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "MONITOR 0 6 20 0"'
+su -c 'wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "MONITOR 0"'
+su -c 'ip link set radiotap0 down'
 ```
 
 ---
 
-## 4. Driver Modification Opportunities (Advanced)
+## 4. `airmon-ng` Compatibility & The `airmon-mtk` Tool
 
-If patching the kernel module directly (`wlan_drv_gen4m.ko`):
+### Why Standard `airmon-ng` Fails
+Standard Linux penetration testing tools rely on the `nl80211` or legacy `WEXT` kernel subsystems:
+```bash
+iw dev wlan0 interface add mon0 type monitor
+# or
+iwconfig wlan0 mode monitor
+```
+On MediaTek `gen4m` drivers, this immediately fails:
+```text
+command failed: Operation not supported on transport endpoint (-95)
+```
+**Root Cause:**
+MediaTek intentionally omits `BIT(NL80211_IFTYPE_MONITOR)` from `wiphy->interface_modes` in `gl_init.c`. Only `NL80211_IFTYPE_STATION`, `NL80211_IFTYPE_AP`, `NL80211_IFTYPE_P2P_CLIENT`, and `NL80211_IFTYPE_P2P_GO` are registered. Any attempt to create or change an interface to monitor type is intercepted and rejected with `-EOPNOTSUPP`.
 
-1. **Bypass Bandwidth Restriction:**
+MediaTek completely isolated monitor mode inside its proprietary `priv_driver_cmds` diagnostic handler, which instantiates an unmanaged `ARPHRD_IEEE80211_RADIOTAP` interface (`radiotap0`).
+
+### The Solution: `airmon-mtk`
+To provide a drop-in replacement that mimics `airmon-ng` and handles channel management and channel hopping, use [`airmon-mtk`](./airmon-mtk):
+
+```bash
+# Push to device:
+adb push airmon-mtk /data/local/tmp/
+adb shell "su -c 'chmod +x /data/local/tmp/airmon-mtk'"
+
+# Start monitor mode on Channel 6 (20MHz):
+su -c '/data/local/tmp/airmon-mtk start 6'
+
+# Switch channel on the fly:
+su -c '/data/local/tmp/airmon-mtk channel 11'
+
+# Start background channel hopping (cycles 1-13 every 0.3s):
+su -c '/data/local/tmp/airmon-mtk hop 0.3'
+
+# Sniff live frames:
+su -c '/data/local/tmp/airmon-mtk sniff'
+# Or capture to PCAP:
+su -c '/data/local/tmp/airmon-mtk sniff /sdcard/capture.pcap'
+
+# Check interface and hopper status:
+su -c '/data/local/tmp/airmon-mtk status'
+
+# Stop monitor mode and kill background hopper:
+su -c '/data/local/tmp/airmon-mtk stop'
+```
+
+---
+
+## 5. Driver Modification & Kernel Patching (Exposing Native `nl80211`)
+
+To make standard tools (`airmon-ng start wlan0`, `iw dev radiotap0 set channel X`) work natively without any helper script:
+
+1. **Advertise Monitor Mode in `wiphy`:**
+   - In `wlan_drv_gen4m.ko` (`gl_init.c` / `mtk_cfg80211_init`), add `BIT(NL80211_IFTYPE_MONITOR)` to `wiphy->interface_modes`.
+2. **Hook `change_virtual_intf` / `add_virtual_intf`:**
+   - In `mtk_cfg80211_change_virtual_intf`, intercept requests where `type == NL80211_IFTYPE_MONITOR` and call `wlanMonWorkHandler` internally instead of returning `-EOPNOTSUPP`.
+3. **Hook Channel Tuning in Monitor State:**
+   - In `mtk_cfg80211_set_channel`, route frequency changes to `priv_driver_set_monitor(1, channel, bw, 0)` when the interface is operating in monitor mode.
+4. **Bypass Bandwidth Restriction:**
    - In `priv_driver_set_monitor` at `0x0808afcc`, NOP or invert the conditional jumps to allow arbitrary channel width configs without failure.
-2. **Promiscuous Control:**
+5. **Promiscuous Control:**
    - Call `wlanSetPromiscuousMode` directly within `wlanMonWorkHandler` to bypass standard BSSID hardware filtering if unicast frame delivery is restricted by firmware.
-3. **Auto-creation on Module Load:**
+6. **Auto-creation on Module Load:**
    - Patch `wlanNetCreate` (`0x6696c`) to call `wlanMonWorkHandler` immediately during boot so `radiotap0` is always present by default without requiring `wpa_cli` invocation.

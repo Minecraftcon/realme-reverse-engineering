@@ -1,0 +1,176 @@
+#!/bin/sh
+# airmon-mtk: CLI monitor mode wrapper for MediaTek gen4m wireless drivers
+# Target Device: Realme Narzo 30A (RMX3171 / MT6768 Helio G85)
+# Reverse-engineered by Shado & Antigravity (2026)
+
+WPA_SOCKET_DIR="/data/vendor/wifi/wpa/sockets"
+IFACE="wlan0"
+MON_IFACE="radiotap0"
+HOP_PID_FILE="/data/local/tmp/airmon_mtk_hop.pid"
+
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "[-] Error: airmon-mtk must be run as root." >&2
+        exit 1
+    fi
+}
+
+send_driver_cmd() {
+    local cmd="$1"
+    wpa_cli -i "$IFACE" -p "$WPA_SOCKET_DIR" driver "$cmd" 2>/dev/null
+}
+
+stop_hopper() {
+    if [ -f "$HOP_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$HOP_PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid" 2>/dev/null
+            echo "[*] Stopped channel hopper (PID $pid)."
+        fi
+        rm -f "$HOP_PID_FILE"
+    fi
+}
+
+start_monitor() {
+    local channel="${1:-6}"
+    local bw="${2:-20}"
+
+    echo "[*] Initializing MediaTek monitor mode on $IFACE (Channel $channel, ${bw}MHz)..."
+
+    stop_hopper
+
+    local res
+    res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
+    if [ "$res" != "OK" ]; then
+        echo "[-] Driver command returned: '$res'. Make sure Wi-Fi is enabled." >&2
+        return 1
+    fi
+
+    # Bring up radiotap0
+    ip link set "$MON_IFACE" up 2>/dev/null
+    sleep 0.2
+
+    if ip link show "$MON_IFACE" >/dev/null 2>&1; then
+        echo "[+] Interface $MON_IFACE created and UP."
+        echo "[+] Ready for raw capture: tcpdump -i $MON_IFACE -n -e -vv"
+    else
+        echo "[-] Error: $MON_IFACE failed to appear in netdev list." >&2
+        return 1
+    fi
+}
+
+stop_monitor() {
+    echo "[*] Disabling monitor mode on $IFACE..."
+    stop_hopper
+
+    send_driver_cmd "MONITOR 0" >/dev/null 2>&1
+    ip link set "$MON_IFACE" down 2>/dev/null
+    echo "[+] Monitor mode disabled. $MON_IFACE is down."
+}
+
+set_channel() {
+    local channel="$1"
+    local bw="${2:-20}"
+
+    if [ -z "$channel" ]; then
+        echo "[-] Usage: airmon-mtk set-channel <channel> [20|40]" >&2
+        return 1
+    fi
+
+    local res
+    res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
+    if [ "$res" = "OK" ]; then
+        echo "[+] Switched $MON_IFACE to Channel $channel (${bw}MHz)."
+    else
+        echo "[-] Failed to switch channel: '$res'" >&2
+        return 1
+    fi
+}
+
+start_hopper() {
+    local delay="${1:-0.5}"
+    stop_hopper
+
+    echo "[*] Starting background channel hopper (1-13, delay ${delay}s)..."
+    nohup sh -c "
+        while true; do
+            for ch in 1 6 11 2 7 12 3 8 13 4 9 5 10; do
+                wpa_cli -i '$IFACE' -p '$WPA_SOCKET_DIR' driver 'MONITOR 1 \$ch 20 0' >/dev/null 2>&1
+                sleep '$delay'
+            done
+        done
+    " >/dev/null 2>&1 &
+    local hop_pid=$!
+    echo "$hop_pid" > "$HOP_PID_FILE"
+    echo "[+] Hopper running in background with PID $hop_pid."
+}
+
+sniff_packets() {
+    local pcap="$1"
+    if [ -n "$pcap" ]; then
+        echo "[*] Capturing raw 802.11 frames to $pcap (Press Ctrl+C to stop)..."
+        tcpdump -i "$MON_IFACE" -w "$pcap" -s 0
+    else
+        echo "[*] Streaming live 802.11 management frames (Press Ctrl+C to stop)..."
+        tcpdump -i "$MON_IFACE" -n -e -vv
+    fi
+}
+
+show_status() {
+    echo "=== MediaTek Monitor Mode Status ==="
+    if ip link show "$MON_IFACE" >/dev/null 2>&1; then
+        echo "[+] $MON_IFACE exists:"
+        ip link show "$MON_IFACE"
+    else
+        echo "[-] $MON_IFACE is not created."
+    fi
+
+    if [ -f "$HOP_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$HOP_PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "[+] Channel hopper is ACTIVE (PID: $pid)."
+        else
+            echo "[-] Channel hopper is INACTIVE."
+        fi
+    else
+        echo "[-] Channel hopper is INACTIVE."
+    fi
+}
+
+check_root
+
+case "$1" in
+    start)
+        start_monitor "$2" "$3"
+        ;;
+    stop)
+        stop_monitor
+        ;;
+    channel|set-channel)
+        set_channel "$2" "$3"
+        ;;
+    hop)
+        start_hopper "$2"
+        ;;
+    sniff)
+        sniff_packets "$2"
+        ;;
+    status)
+        show_status
+        ;;
+    *)
+        echo "airmon-mtk: MediaTek Wi-Fi Monitor Mode Tool"
+        echo "Usage: airmon-mtk <command> [options]"
+        echo ""
+        echo "Commands:"
+        echo "  start [channel] [bw]   Enable monitor mode (default ch 6, 20MHz)"
+        echo "  stop                   Disable monitor mode and stop hopper"
+        echo "  channel <channel> [bw] Switch monitor channel on the fly"
+        echo "  hop [delay_seconds]    Start background channel hopping"
+        echo "  sniff [out.pcap]       Stream live packets or dump to PCAP"
+        echo "  status                 Display monitor interface status"
+        exit 1
+        ;;
+esac
