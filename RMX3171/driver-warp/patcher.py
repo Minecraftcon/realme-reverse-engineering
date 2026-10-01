@@ -197,6 +197,182 @@ def apply_step4_rx_promisc_unlock(data):
 
     return data
 
+def apply_step5_raw_tx_injection(data):
+    """
+    Step 5: Raw 802.11 Packet Injection Over The Air
+    1. In wlanProcessTxFrame (0x1e424):
+       Replace 'b.eq 0x1e44c' (drop on non-Ethernet frames) with NOP (1f 20 03 d5).
+       Allows raw 802.11 management/control/data frames to pass classification.
+    2. In kalHardStartXmit (0x6f190):
+       Replace 'b.eq 0x6f1ec' (drop on classification error) with NOP (1f 20 03 d5).
+       Ensures raw frames proceed straight to the HIF TX queue.
+    3. Clear relocations in range [0x16800, 0x16900] for Code Caves 1 & 2.
+    4. Code Cave 1 at 0x16800 (kalHardStartXmit Trampoline):
+       - Keeps ucBssIndex = 0 in [x20, #0x38] (CRITICAL: prevents kernel data abort in kalSendCompleteAndAwakeQueue).
+       - Identifies mon0 via prDev->type == 0x323 (ARPHRD_IEEE80211_RADIOTAP at [x22, #0x234]).
+       - Automatically strips userland Radiotap header if present.
+       - Marks skb->cb[1] ([x20, #0x39]) = 1 as mon0 injection flag.
+       - Hooked at 0x6f178 (b 0x16800).
+    5. Code Cave 2 at 0x16860 (nicTxFillMsduInfo Direct Hardware TX Routing):
+       - Checks skb->cb[1] ([x20, #0x39]) == 1.
+       - Sets ucPacketType = 3 (TX_PACKET_TYPE_MGMT), bypassing Queue Manager drop.
+       - Sets fgIs802_11 = 1, ucStaRecIndex = 0xff, ucBssIndex = 0.
+       - Sets ucMacHeaderLength = 24, u2PayloadLength = skb->len.
+       - Sets ucFormat = FORMAT_802_11_NORMAL (2).
+       - Hooked at 0x47680 (b 0x16860).
+    """
+    # 1. Bypass kalQoSFrameClassifier drop in wlanProcessTxFrame (0x1e424 -> NOP)
+    tx_classifier_offset = 0x44 + 0x1e424
+    data[tx_classifier_offset : tx_classifier_offset + 4] = bytes.fromhex("1f2003d5")
+    print("[+] Step 5: Patched wlanProcessTxFrame (0x1e424 -> NOP) to allow raw 802.11 frames.")
+
+    # 2. Bypass drop branch in kalHardStartXmit (0x6f190 -> NOP)
+    tx_drop_offset = 0x44 + 0x6f190
+    data[tx_drop_offset : tx_drop_offset + 4] = bytes.fromhex("1f2003d5")
+    print("[+] Step 5: Patched kalHardStartXmit (0x6f190 -> NOP) to forward raw frames to HIF TX queue.")
+
+    # 3. Clear dead relocations in [0x16800, 0x16900]
+    rela_text_off = 0x1fe5e0
+    rela_text_sz = 0x27f0d8
+    cleared = 0
+    for i in range(0, rela_text_sz, 24):
+        entry_off = rela_text_off + i
+        r_off, r_info, r_addend = struct.unpack("<QQq", data[entry_off : entry_off + 24])
+        if 0x16800 <= r_off < 0x16900:
+            struct.pack_into("<Qq", data, entry_off + 8, 0, 0)
+            cleared += 1
+    print(f"[+] Step 5 (Code Caves): Cleared {cleared} legacy relocations in dumpMemory8 cave range [0x16800-0x16900].")
+
+    # AArch64 opcode encoders
+    def ldrh_imm(rt, rn, imm):
+        return (0x79400000 | ((imm >> 1) << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def strh_imm(rt, rn, imm):
+        return (0x79000000 | ((imm >> 1) << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def ldrb_imm(rt, rn, imm):
+        return (0x39400000 | (imm << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def strb_imm(rt, rn, imm):
+        return (0x39000000 | (imm << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def ldr_x_imm(rt, rn, imm):
+        return (0xf9400000 | ((imm >> 3) << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def str_x_imm(rt, rn, imm):
+        return (0xf9000000 | ((imm >> 3) << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def ldr_w_imm(rt, rn, imm):
+        return (0xb9400000 | ((imm >> 2) << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def str_w_imm(rt, rn, imm):
+        return (0xb9000000 | ((imm >> 2) << 10) | (rn << 5) | rt).to_bytes(4, 'little')
+    def movz_w(rt, imm):
+        return (0x52800000 | (imm << 5) | rt).to_bytes(4, 'little')
+    def cmp_w_imm(rn, imm):
+        return (0x71000000 | (imm << 10) | (rn << 5) | 0x1f).to_bytes(4, 'little')
+    def b_cond(src, dst, cond):
+        diff = (dst - src) >> 2
+        return (0x54000000 | ((diff & 0x7ffff) << 5) | cond).to_bytes(4, 'little')
+    def b_imm(src, dst):
+        diff = (dst - src) >> 2
+        return (0x14000000 | (diff & 0x03ffffff)).to_bytes(4, 'little')
+    def add_x_reg(rd, rn, rm):
+        return (0x8b000000 | (rm << 16) | (rn << 5) | rd).to_bytes(4, 'little')
+    def sub_w_reg(rd, rn, rm):
+        return (0x4b000000 | (rm << 16) | (rn << 5) | rd).to_bytes(4, 'little')
+    def cbnz_w(rt, src, dst):
+        diff = (dst - src) >> 2
+        return (0x35000000 | ((diff & 0x7ffff) << 5) | rt).to_bytes(4, 'little')
+
+    # 4. Assemble Cave 1 (kalHardStartXmit at 0x16800)
+    cave1_insns = [
+        ('entry', strb_imm(21, 20, 0x38)),           # strb w21, [x20, #0x38] (stock ucBssIndex = 0)
+        (None, ldrh_imm(8, 22, 0x234)),              # ldrh w8, [x22, #0x234] (prDev->type)
+        (None, cmp_w_imm(8, 0x323)),                 # cmp w8, #0x323 (ARPHRD_IEEE80211_RADIOTAP)
+        (None, lambda pc: b_cond(pc, labels1['normal_hif'], 1)), # b.ne normal_hif
+        (None, ldr_x_imm(9, 20, 0xf8)),              # ldr x9, [x20, #0xf8] (skb->data)
+        (None, ldrh_imm(10, 9, 0)),                  # ldrh w10, [x9] (it_version, it_pad)
+        (None, lambda pc: cbnz_w(10, pc, labels1['is_raw'])),    # cbnz w10, is_raw
+        (None, ldrh_imm(11, 9, 2)),                  # ldrh w11, [x9, #2] (it_len)
+        (None, cmp_w_imm(11, 4)),                    # cmp w11, #4
+        (None, lambda pc: b_cond(pc, labels1['is_raw'], 3)),     # b.lo is_raw
+        (None, add_x_reg(9, 9, 11)),                 # add x9, x9, x11 (skb->data += it_len)
+        (None, str_x_imm(9, 20, 0xf8)),              # str x9, [x20, #0xf8]
+        (None, ldr_w_imm(12, 20, 0xa0)),             # ldr w12, [x20, #0xa0] (skb->len)
+        (None, sub_w_reg(12, 12, 11)),               # sub w12, w12, w11 (skb->len -= it_len)
+        (None, str_w_imm(12, 20, 0xa0)),             # str w12, [x20, #0xa0]
+        ('is_raw', movz_w(8, 1)),                    # mov w8, #1 (mon0 marker flag)
+        (None, strb_imm(8, 20, 0x39)),               # strb w8, [x20, #0x39] (skb->cb[1] = 1)
+        (None, lambda pc: b_imm(pc, labels1['hif_done'])),       # b hif_done
+        ('normal_hif', strb_imm(31, 20, 0x39)),      # strb wzr, [x20, #0x39] (skb->cb[1] = 0 for wlan0)
+        ('hif_done', bytes.fromhex('fa031baa')),     # mov x26, x27 (stock instruction from 0x6f17c)
+        (None, lambda pc: b_imm(pc, 0x6f180))        # b 0x6f180 (return to kalHardStartXmit)
+    ]
+    labels1 = {}
+    pc = 0x16800
+    for label, item in cave1_insns:
+        if label:
+            labels1[label] = pc
+        pc += 4
+    cave1_bytes = bytearray()
+    pc = 0x16800
+    for label, item in cave1_insns:
+        if callable(item):
+            cave1_bytes += item(pc)
+        else:
+            cave1_bytes += item
+        pc += 4
+
+    data[0x44 + 0x16800 : 0x44 + 0x16800 + len(cave1_bytes)] = cave1_bytes
+    print(f"[+] Step 5: Injected Cave 1 ({len(cave1_bytes)} bytes) at 0x16800.")
+
+    # Hook kalHardStartXmit at 0x6f178: b 0x16800
+    hook1 = b_imm(0x6f178, 0x16800)
+    data[0x44 + 0x6f178 : 0x44 + 0x6f178 + len(hook1)] = hook1
+    print("[+] Step 5: Hooked kalHardStartXmit (0x6f178 -> 0x16800).")
+
+    # 5. Assemble Cave 2 (nicTxFillMsduInfo at 0x16860)
+    cave2_insns = [
+        ('entry', ldrb_imm(8, 20, 0x39)),            # ldrb w8, [x20, #0x39] (check mon0 marker)
+        (None, cmp_w_imm(8, 1)),                     # cmp w8, #1
+        (None, lambda pc: b_cond(pc, labels2['normal_msdu'], 1)), # b.ne normal_msdu
+        (None, movz_w(8, 1)),                        # mov w8, #1
+        (None, strb_imm(8, 19, 0x1e)),               # strb w8, [x19, #0x1e] (fgIs802_11 = 1)
+        (None, strb_imm(8, 19, 0x25)),               # strb w8, [x19, #0x25] (fgIs802_11 = 1)
+        (None, strb_imm(8, 19, 0x38)),               # strb w8, [x19, #0x38] (ucControlFlag = MSDU_CONTROL_FLAG_FORCE_TX = 1)
+        (None, movz_w(8, 0xff)),                     # mov w8, #0xff
+        (None, strb_imm(8, 19, 0x1f)),               # strb w8, [x19, #0x1f] (ucStaRecIndex = 0xff)
+        (None, movz_w(8, 0)),                        # mov w8, #0
+        (None, strb_imm(8, 19, 0x20)),               # strb w8, [x19, #0x20] (ucBssIndex = 0)
+        (None, movz_w(8, 0x18)),                     # mov w8, #0x18 (24 bytes)
+        (None, strb_imm(8, 19, 0x41)),               # strb w8, [x19, #0x41] (ucMacHeaderLength = 24)
+        (None, ldr_w_imm(8, 20, 0xa0)),              # ldr w8, [x20, #0xa0] (skb->len)
+        (None, strh_imm(8, 19, 0x44)),               # strh w8, [x19, #0x44] (u2PayloadLength = skb->len)
+        (None, movz_w(8, 2)),                        # mov w8, #2
+        (None, strb_imm(8, 19, 0x6c)),               # strb w8, [x19, #0x6c] (ucFormat = FORMAT_802_11_NORMAL)
+        (None, lambda pc: b_imm(pc, 0x476f4)),       # b 0x476f4 (skip wlanPktTxDone, use nicTxDummyTxDone!)
+        ('normal_msdu', ldrb_imm(8, 19, 0x6c)),      # ldrb w8, [x19, #0x6c]
+        (None, lambda pc: b_imm(pc, 0x47684))        # b 0x47684
+    ]
+    labels2 = {}
+    pc = 0x16860
+    for label, item in cave2_insns:
+        if label:
+            labels2[label] = pc
+        pc += 4
+    cave2_bytes = bytearray()
+    pc = 0x16860
+    for label, item in cave2_insns:
+        if callable(item):
+            cave2_bytes += item(pc)
+        else:
+            cave2_bytes += item
+        pc += 4
+
+    data[0x44 + 0x16860 : 0x44 + 0x16860 + len(cave2_bytes)] = cave2_bytes
+    print(f"[+] Step 5: Injected Cave 2 ({len(cave2_bytes)} bytes) at 0x16860.")
+
+    # Hook nicTxFillMsduInfo at 0x47680: b 0x16860
+    hook2 = b_imm(0x47680, 0x16860)
+    data[0x44 + 0x47680 : 0x44 + 0x47680 + len(hook2)] = hook2
+    print("[+] Step 5: Hooked nicTxFillMsduInfo (0x47680 -> 0x16860).")
+
+    return data
+
 def main():
     print("=" * 60)
     print(" MediaTek wlan_drv_gen4m Warp Patcher")
@@ -222,6 +398,9 @@ def main():
     
     # Apply Step 4: Hardware Promiscuous RX & Packet Filter Unlock
     data = apply_step4_rx_promisc_unlock(data)
+    
+    # Apply Step 5: Raw 802.11 Packet Injection Over The Air
+    data = apply_step5_raw_tx_injection(data)
     
     with open(OUTPUT_KO, "wb") as f:
         f.write(data)

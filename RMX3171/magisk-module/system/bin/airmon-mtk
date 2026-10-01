@@ -66,8 +66,16 @@ stop_hopper() {
 }
 
 start_monitor() {
-    local channel="${1:-6}"
-    local bw="${2:-20}"
+    local channel="6"
+    local bw="20"
+    if [ "$1" = "wlan0" ] || [ "$1" = "wlan1" ]; then
+        IFACE="$1"
+        channel="${2:-6}"
+        bw="${3:-20}"
+    else
+        channel="${1:-6}"
+        bw="${2:-20}"
+    fi
 
     echo "[*] Initializing MediaTek monitor mode on $IFACE (Channel $channel, ${bw}MHz)..."
 
@@ -110,6 +118,15 @@ start_monitor() {
     # Disable power save and hold wake lock so baseband never goes to sleep
     iw dev "$IFACE" set power_save off 2>/dev/null
     echo "airmon_wake" > /sys/power/wake_lock 2>/dev/null
+
+    # Sync physical hardware MAC to monitor interface to prevent 00:00:00:00:00:00 injection drops
+    if [ -f "/sys/class/net/$IFACE/address" ]; then
+        local hw_mac
+        hw_mac=$(cat "/sys/class/net/$IFACE/address" 2>/dev/null)
+        if [ -n "$hw_mac" ] && [ "$hw_mac" != "00:00:00:00:00:00" ]; then
+            ip link set "$MON_IFACE" address "$hw_mac" 2>/dev/null
+        fi
+    fi
 
     # Bring up monitor interface
     ip link set "$MON_IFACE" up 2>/dev/null
