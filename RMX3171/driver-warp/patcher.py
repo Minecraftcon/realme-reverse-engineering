@@ -161,6 +161,42 @@ def apply_step3_code_cave_autospawn(data):
     print("[+] Step 3 (Hook): Hooked wlanNetCreate (0x670a0 -> 0x1679c).")
     return data
 
+def apply_step4_rx_promisc_unlock(data):
+    """
+    Step 4: Hardware Promiscuous RX & Packet Filter Unlock
+    1. In wlanoidSetCurrentPacketFilter (0x32bf0):
+       Bypass 'cmp w22, #0x10' promiscuous mode rejection.
+       Replace 0x32bf0 with 'b 0x32c38' (12 00 00 14) and clear 9 dead relocations.
+    2. In nicRxProcessRFBs (0x4fca8):
+       Bypass packet type whitelist check ('cmp w8, #2' / 'b.ne 0x4fcfc').
+       Replace 'b.ne 0x4fcfc' at 0x4fca8 with NOP (1f 20 03 d5) so all frames
+       flow into nicRxProcessMonitorPacket when monitor mode is enabled.
+    """
+    # 1. Bypass packet filter check
+    filter_bypass_offset = 0x44 + 0x32bf0
+    data[filter_bypass_offset : filter_bypass_offset + 4] = bytes.fromhex("12000014") # b 0x32c38
+    print("[+] Step 4: Patched wlanoidSetCurrentPacketFilter (0x32bf0 -> b 0x32c38).")
+
+    # Clear 9 dead relocations in [0x32bf0, 0x32c38)
+    rela_offset = 0x1fe5e0
+    rela_size = 0x27f0d8
+    num_entries = rela_size // 24
+    cleared = 0
+    for i in range(num_entries):
+        entry = data[rela_offset + i*24 : rela_offset + (i+1)*24]
+        r_offset, r_info, r_addend = struct.unpack("<QQq", entry)
+        if 0x32bf0 <= r_offset < 0x32c38:
+            data[rela_offset + i*24 : rela_offset + (i+1)*24] = b"\x00" * 24
+            cleared += 1
+    print(f"[+] Step 4: Cleared {cleared} dead relocations in packet filter check.")
+
+    # 2. Allow all packet types into monitor handler when monitor mode is active
+    rfb_check_offset = 0x44 + 0x4fca8
+    data[rfb_check_offset : rfb_check_offset + 4] = bytes.fromhex("1f2003d5") # nop
+    print("[+] Step 4: Patched nicRxProcessRFBs (0x4fca8 -> NOP) to forward all packet types to mon0.")
+
+    return data
+
 def main():
     print("=" * 60)
     print(" MediaTek wlan_drv_gen4m Warp Patcher")
@@ -184,6 +220,9 @@ def main():
     # Apply Step 3: Code Cave Trampoline Auto-Spawn (wlanNetCreate -> dumpMemory8 -> priv_driver_set_monitor)
     data = apply_step3_code_cave_autospawn(data)
     
+    # Apply Step 4: Hardware Promiscuous RX & Packet Filter Unlock
+    data = apply_step4_rx_promisc_unlock(data)
+    
     with open(OUTPUT_KO, "wb") as f:
         f.write(data)
         
@@ -191,4 +230,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

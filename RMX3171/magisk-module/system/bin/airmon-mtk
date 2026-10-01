@@ -122,13 +122,14 @@ set_channel() {
 }
 
 start_hopper() {
-    local delay="${1:-0.5}"
+    local delay="${1:-0.12}"
     stop_hopper
 
-    echo "[*] Starting background channel hopper (1-13, delay ${delay}s)..."
+    echo "[*] Starting high-speed channel hopper (1-13 weighted, delay ${delay}s)..."
     nohup sh -c '
         while true; do
-            for ch in 1 6 11 2 7 12 3 8 13 4 9 5 10; do
+            # Non-overlapping channels (1, 6, 11) weighted for fastest beacon acquisition
+            for ch in 1 6 11 1 2 6 7 11 12 1 3 6 8 11 13 4 9 5 10; do
                 wpa_cli -i "'"$IFACE"'" -p "'"$WPA_SOCKET_DIR"'" driver "MONITOR 1 $ch 20 0" >/dev/null 2>&1
                 sleep "'"$delay"'"
             done
@@ -136,7 +137,7 @@ start_hopper() {
     ' >/dev/null 2>&1 &
     local hop_pid=$!
     echo "$hop_pid" > "$HOP_PID_FILE"
-    echo "[+] Hopper running in background with PID $hop_pid."
+    echo "[+] High-speed hopper running in background with PID $hop_pid."
 }
 
 sniff_packets() {
