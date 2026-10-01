@@ -160,7 +160,13 @@ timeout_wpa3_mfp_analysis="10"
 osversionfile_dir="/etc/"
 plugins_dir="plugins/"
 ag_orchestrator_file="ag.orchestrator.txt"
-system_tmpdir="/tmp/"
+if [ -d "/data/local/tmp" ] && [ ! -w "/tmp" ]; then
+	system_tmpdir="/data/local/tmp/"
+elif [ -n "${TMPDIR}" ] && [ -w "${TMPDIR}" ]; then
+	system_tmpdir="${TMPDIR%/}/"
+else
+	system_tmpdir="/tmp/"
+fi
 minimum_bash_version_required="4.2"
 resume_message=224
 abort_question=12
@@ -19940,13 +19946,26 @@ function create_tmux_session() {
 
 	session_name="${1}"
 
+	tmux new-session -d -s "${1}"
+	tmux set-option -t "${1}" mouse on
+
+	local tmux_shell_bin
+	if [ -x "/system_ext/bin/bash" ]; then
+		tmux_shell_bin="/system_ext/bin/bash"
+	elif [ -x "/data/data/com.termux/files/usr/bin/bash" ]; then
+		tmux_shell_bin="/data/data/com.termux/files/usr/bin/bash"
+	else
+		tmux_shell_bin="$(command -v bash 2>/dev/null || echo "/bin/sh")"
+	fi
+	tmux set-option -t "${1}" default-shell "${tmux_shell_bin}"
+	tmux set-option -t "${1}" default-command "${tmux_shell_bin}"
+	tmux set-environment -t "${1}" PATH "${PATH}"
+	tmux set-environment -t "${1}" LD_LIBRARY_PATH "${LD_LIBRARY_PATH}"
+	tmux set-environment -t "${1}" TMPDIR "${system_tmpdir}"
+
 	if [ "${2}" = "true" ]; then
-		tmux new-session -d -s "${1}"
-		tmux set-option -t "${1}" mouse on
 		start_airgeddon_from_tmux "normal"
 	else
-		tmux new-session -d -s "${1}"
-		tmux set-option -t "${1}" mouse on
 		start_airgeddon_from_tmux "nested"
 	fi
 }
