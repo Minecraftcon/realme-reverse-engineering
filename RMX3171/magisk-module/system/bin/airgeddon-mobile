@@ -218,7 +218,9 @@ EOF
 get_client_count() {
     local bssid="$1"
     [ ! -s "$CLIENTS_FILE" ] && echo "0" && return
-    grep -c -i "|$bssid|" "$CLIENTS_FILE" 2>/dev/null || echo "0"
+    local cnt
+    cnt=$(grep -c -i "|$bssid|" "$CLIENTS_FILE" 2>/dev/null)
+    echo "${cnt:-0}"
 }
 
 select_client_station() {
@@ -257,7 +259,7 @@ run_timed_scan() {
     mon_dev=$(get_mon_iface)
     if [ -z "$mon_dev" ]; then
         echo -e "\n${C_CYN}[*] Starting monitor mode...${C_RST}"
-        airmon-mtk start
+        airmon-mtk start 1 >/dev/null 2>&1
         mon_dev=$(get_mon_iface)
     fi
 
@@ -274,7 +276,27 @@ run_timed_scan() {
     local airodump_bin="/data/data/com.termux/files/usr/bin/airodump-ng"
     [ ! -x "$airodump_bin" ] && airodump_bin="$(command -v airodump-ng 2>/dev/null)"
 
-    timeout "$dur" "$airodump_bin" "$mon_dev" --output-format csv -w "$scan_base" >/dev/null 2>&1
+    # Execute airodump-ng with --background 1 and < /dev/null to prevent SIGTTIN terminal hangs
+    "$airodump_bin" "$mon_dev" --background 1 --write-interval 1 --output-format csv -w "$scan_base" < /dev/null >/dev/null 2>&1 &
+    local dump_pid=$!
+
+    # Active countdown progress bar
+    local elapsed=0
+    while [ "$elapsed" -lt "$dur" ] && kill -0 "$dump_pid" 2>/dev/null; do
+        sleep 1
+        elapsed=$((elapsed + 1))
+        local rem=$((dur - elapsed))
+        [ "$rem" -lt 0 ] && rem=0
+        echo -en "\r${C_CYN}[*] Scanning radio spectrum... ${C_YLW}${rem}s remaining${C_RST}  "
+    done
+    echo ""
+
+    # Gracefully notify airodump-ng to flush CSV buffers
+    kill -INT "$dump_pid" 2>/dev/null
+    sleep 0.5
+    kill -9 "$dump_pid" 2>/dev/null
+    wait "$dump_pid" 2>/dev/null
+
     [ "$started_hop" -eq 1 ] && airmon-mtk stop-hop >/dev/null 2>&1
 
     if [ -f "${scan_base}-01.csv" ]; then
@@ -313,9 +335,17 @@ select_target_ap() {
     fi
 
     if [ ! -s "$TARGETS_FILE" ]; then
-        echo -e "${C_RED}[-] Still no targets found. Please check radio or location.${C_RST}"
-        pause
-        return 1
+        echo -e "${C_RED}[-] No targets detected in last scan.${C_RST}"
+        echo -e " ${C_CYN}1)${C_RST} Rescan (10s sweep)"
+        echo -e " ${C_CYN}2)${C_RST} Refresh Monitor Mode (clears baseband RX queue)"
+        echo -e " ${C_CYN}0)${C_RST} Back to Menu"
+        echo -en "${C_YLW}Select option [0-2]: ${C_RST}"
+        read -r rec_opt
+        case "$rec_opt" in
+            1) run_timed_scan 10; select_target_ap; return ;;
+            2) airmon-mtk start 1; run_timed_scan 10; select_target_ap; return ;;
+            *) return 1 ;;
+        esac
     fi
 
     while true; do
