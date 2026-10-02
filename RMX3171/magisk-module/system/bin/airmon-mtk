@@ -29,14 +29,6 @@ start_keeper() {
     stop_keeper
     iw dev "$IFACE" set power_save off 2>/dev/null
     echo "airmon_wake" > /sys/power/wake_lock 2>/dev/null
-    nohup sh -c '
-        while true; do
-            cmd wifi start-scan >/dev/null 2>&1
-            sleep 2.5
-        done
-    ' >/dev/null 2>&1 &
-    local kpid=$!
-    echo "$kpid" > "$KEEPER_PID_FILE"
 }
 
 stop_keeper() {
@@ -170,7 +162,6 @@ set_channel() {
     res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
     if [ "$res" = "OK" ]; then
         echo "[+] Switched $MON_IFACE to Channel $channel (${bw}MHz)."
-        cmd wifi start-scan >/dev/null 2>&1
     else
         echo "[-] Failed to switch channel: '$res'" >&2
         return 1

@@ -231,17 +231,42 @@ def apply_step5_raw_tx_injection(data):
     data[tx_drop_offset : tx_drop_offset + 4] = bytes.fromhex("1f2003d5")
     print("[+] Step 5: Patched kalHardStartXmit (0x6f190 -> NOP) to forward raw frames to HIF TX queue.")
 
-    # 3. Clear dead relocations in [0x16800, 0x16900]
+    # 2b. Bypass 'Drop the Packet for inactive Bss' in qmEnqueueTxPackets (0x5492c and 0x54934 -> NOP)
+    qm_drop_offset1 = 0x44 + 0x5492c
+    data[qm_drop_offset1 : qm_drop_offset1 + 4] = bytes.fromhex("1f2003d5")
+    qm_drop_offset2 = 0x44 + 0x54934
+    data[qm_drop_offset2 : qm_drop_offset2 + 4] = bytes.fromhex("1f2003d5")
+    print("[+] Step 5: Patched qmEnqueueTxPackets (0x5492c & 0x54934 -> NOP) to prevent inactive BSS drop.")
+
+    # 2c. Bypass 'Drop the Packet for no STA_REC' in qmEnqueueTxPackets (0x54988 -> b.eq 0x54994)
+    # Routes unassociated unicast / raw injection frames directly to rBmTxQueue instead of dropping
+    qm_sta_offset = 0x44 + 0x54988
+    data[qm_sta_offset : qm_sta_offset + 4] = bytes.fromhex("60000054")
+    print("[+] Step 5: Patched qmEnqueueTxPackets (0x54988 -> b.eq 0x54994) to forward unassociated frames to rBmTxQueue.")
+
+    # 2d. Bypass 'Drop packets (BSS[0] is INACTIVE)' in qmGetFrameAction (0x5a8ec -> mov w24, #2; b 0x5ab60)
+    # Forces qmGetFrameAction to return FRAME_ACTION_TX (2) so frames always transmit OTA
+    action_offset = 0x44 + 0x5a8ec
+    data[action_offset : action_offset + 8] = bytes.fromhex("580080529c000014")
+    print("[+] Step 5: Patched qmGetFrameAction (0x5a8ec -> FRAME_ACTION_TX) to authorize transmission on inactive BSS.")
+
+    # 2e. Bypass 'Drop packet for inactive BSS' in qmDequeueTxPacketsFromGlobalQueue (0x55c98 -> NOP)
+    # Prevents dropping MSDU frames via wlanProcessQueuedMsduInfo when BSS[0]->fgIsNetActive == 0 in monitor mode
+    qm_deq_offset = 0x44 + 0x55c98
+    data[qm_deq_offset : qm_deq_offset + 4] = bytes.fromhex("1f2003d5")
+    print("[+] Step 5: Patched qmDequeueTxPacketsFromGlobalQueue (0x55c98 -> NOP) to prevent inactive BSS dequeue drop.")
+
+    # 3. Clear dead relocations in [0x16800, 0x16980]
     rela_text_off = 0x1fe5e0
     rela_text_sz = 0x27f0d8
     cleared = 0
     for i in range(0, rela_text_sz, 24):
         entry_off = rela_text_off + i
         r_off, r_info, r_addend = struct.unpack("<QQq", data[entry_off : entry_off + 24])
-        if 0x16800 <= r_off < 0x16900:
+        if 0x16800 <= r_off < 0x16980:
             struct.pack_into("<Qq", data, entry_off + 8, 0, 0)
             cleared += 1
-    print(f"[+] Step 5 (Code Caves): Cleared {cleared} legacy relocations in dumpMemory8 cave range [0x16800-0x16900].")
+    print(f"[+] Step 5 (Code Caves): Cleared {cleared} legacy relocations in dumpMemory8 cave range [0x16800-0x16980].")
 
     # AArch64 opcode encoders
     def ldrh_imm(rt, rn, imm):
@@ -277,6 +302,19 @@ def apply_step5_raw_tx_injection(data):
     def cbnz_w(rt, src, dst):
         diff = (dst - src) >> 2
         return (0x35000000 | ((diff & 0x7ffff) << 5) | rt).to_bytes(4, 'little')
+    def bl_imm(src, dst):
+        diff = (dst - src) >> 2
+        return (0x94000000 | (diff & 0x03ffffff)).to_bytes(4, 'little')
+    def encode_adr(src, dst, reg=8):
+        diff = dst - src
+        immlo = (diff & 3) << 29
+        immhi = ((diff >> 2) & 0x7ffff) << 5
+        val = 0x10000000 | immlo | immhi | (reg & 0x1f)
+        return val.to_bytes(4, 'little')
+    def encode_cbz_x(src, dst, reg=2):
+        diff = (dst - src) >> 2
+        val = 0xb4000000 | ((diff & 0x7ffff) << 5) | (reg & 0x1f)
+        return val.to_bytes(4, 'little')
 
     # 4. Assemble Cave 1 (kalHardStartXmit at 0x16800)
     cave1_insns = [
@@ -325,11 +363,15 @@ def apply_step5_raw_tx_injection(data):
     data[0x44 + 0x6f178 : 0x44 + 0x6f178 + len(hook1)] = hook1
     print("[+] Step 5: Hooked kalHardStartXmit (0x6f178 -> 0x16800).")
 
-    # 5. Assemble Cave 2 (nicTxFillMsduInfo at 0x16860)
+    # 5. Assemble Cave 2 (nicTxFillMsduInfo at 0x16860) + Custom TxDone at 0x168c0
     cave2_insns = [
+        # --- Cave 2 Entry (hooked at 0x475cc in nicTxFillMsduInfo) ---
         ('entry', ldrb_imm(8, 20, 0x39)),            # ldrb w8, [x20, #0x39] (check mon0 marker)
         (None, cmp_w_imm(8, 1)),                     # cmp w8, #1
         (None, lambda pc: b_cond(pc, labels2['normal_msdu'], 1)), # b.ne normal_msdu
+        # Injected raw 802.11 frame setup:
+        (None, movz_w(8, 0)),                        # mov w8, #0
+        (None, str_w_imm(8, 19, 0x18)),              # str w8, [x19, #0x18] (prMsduInfo->ucPacketType = 0 DATA)
         (None, movz_w(8, 1)),                        # mov w8, #1
         (None, strb_imm(8, 19, 0x1e)),               # strb w8, [x19, #0x1e] (fgIs802_11 = 1)
         (None, strb_imm(8, 19, 0x25)),               # strb w8, [x19, #0x25] (fgIs802_11 = 1)
@@ -344,9 +386,30 @@ def apply_step5_raw_tx_injection(data):
         (None, strh_imm(8, 19, 0x44)),               # strh w8, [x19, #0x44] (u2PayloadLength = skb->len)
         (None, movz_w(8, 2)),                        # mov w8, #2
         (None, strb_imm(8, 19, 0x6c)),               # strb w8, [x19, #0x6c] (ucFormat = FORMAT_802_11_NORMAL)
-        (None, lambda pc: b_imm(pc, 0x476f4)),       # b 0x476f4 (skip wlanPktTxDone, use nicTxDummyTxDone!)
-        ('normal_msdu', ldrb_imm(8, 19, 0x6c)),      # ldrb w8, [x19, #0x6c]
-        (None, lambda pc: b_imm(pc, 0x47684))        # b 0x47684
+        (None, lambda pc: encode_adr(pc, labels2['my_txdone'], 8)), # adr x8, my_txdone
+        (None, str_x_imm(8, 19, 0x58)),              # str x8, [x19, #0x58] (prMsduInfo->pfTxDoneHandler = my_txdone)
+        (None, lambda pc: b_imm(pc, 0x47708)),       # b 0x47708 (write nicHifTxMsduDoneCb and return 1)
+        ('normal_msdu', ldrb_imm(8, 20, 0x38)),      # ldrb w8, [x20, #0x38] (stock instruction at 0x475cc)
+        (None, lambda pc: b_imm(pc, 0x475d0)),       # b 0x475d0 (continue normal nicTxFillMsduInfo)
+
+        # --- Custom TxDone Handler for mon0 ---
+        # Called from nicTxProcessTxDoneEvent(x0=prAdapter, x1=prMsduInfo, x2=ucStatus)
+        ('my_txdone', bytes.fromhex('fd7bbea9')),    # stp x29, x30, [sp, #-32]!
+        (None, bytes.fromhex('f35301a9')),           # stp x19, x20, [sp, #16]
+        (None, bytes.fromhex('fd030091')),           # mov x29, sp
+        (None, bytes.fromhex('f30300aa')),           # mov x19, x0 (prAdapter)
+        (None, bytes.fromhex('f40301aa')),           # mov x20, x1 (prMsduInfo)
+        (None, ldr_x_imm(2, 20, 0x10)),              # ldr x2, [x20, #0x10] (skb = prMsduInfo->prPacket)
+        (None, lambda pc: encode_cbz_x(pc, labels2['txdone_exit'], 2)), # cbz x2, txdone_exit
+        (None, bytes.fromhex('08fd8752')),           # mov w8, #0x3fe8
+        (None, bytes.fromhex('2800a072')),           # movk w8, #1, lsl #16 (w8 = 0x13fe8)
+        (None, bytes.fromhex('606a68f8')),           # ldr x0, [x19, x8] (prGlueInfo = prAdapter->prGlueInfo)
+        (None, bytes.fromhex('e10302aa')),           # mov x1, x2 (skb)
+        (None, lambda pc: bl_imm(pc, 0x6f57c)),      # bl kalSendCompleteAndAwakeQueue (0x6f57c)
+        (None, str_x_imm(31, 20, 0x10)),             # str xzr, [x20, #0x10] (prMsduInfo->prPacket = NULL)
+        ('txdone_exit', bytes.fromhex('f35341a9')),  # ldp x19, x20, [sp, #16]
+        (None, bytes.fromhex('fd7bc2a8')),           # ldp x29, x30, [sp], #32
+        (None, bytes.fromhex('c0035fd6'))            # ret
     ]
     labels2 = {}
     pc = 0x16860
@@ -366,10 +429,10 @@ def apply_step5_raw_tx_injection(data):
     data[0x44 + 0x16860 : 0x44 + 0x16860 + len(cave2_bytes)] = cave2_bytes
     print(f"[+] Step 5: Injected Cave 2 ({len(cave2_bytes)} bytes) at 0x16860.")
 
-    # Hook nicTxFillMsduInfo at 0x47680: b 0x16860
-    hook2 = b_imm(0x47680, 0x16860)
-    data[0x44 + 0x47680 : 0x44 + 0x47680 + len(hook2)] = hook2
-    print("[+] Step 5: Hooked nicTxFillMsduInfo (0x47680 -> 0x16860).")
+    # Hook nicTxFillMsduInfo at 0x475cc: b 0x16860
+    hook2 = b_imm(0x475cc, 0x16860)
+    data[0x44 + 0x475cc : 0x44 + 0x475cc + len(hook2)] = hook2
+    print("[+] Step 5: Hooked nicTxFillMsduInfo (0x475cc -> 0x16860).")
 
     return data
 
