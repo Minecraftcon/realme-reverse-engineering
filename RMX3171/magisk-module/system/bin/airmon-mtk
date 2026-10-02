@@ -27,79 +27,81 @@ send_driver_cmd() {
 }
 
 suppress_android_scanning() {
-    echo "[*] Suppressing Android background Wi-Fi scans & network roaming..."
+    echo "[*] Engaging pure Linux isolation (disabling Android Wi-Fi & scan managers)..."
 
-    # 1. Record original wifi_scan_always_enabled
+    local was_enabled=0
+    if cmd wifi status 2>/dev/null | grep -q "Wifi is enabled"; then
+        was_enabled=1
+    fi
     local orig_scan
     orig_scan=$(settings get global wifi_scan_always_enabled 2>/dev/null)
     [ -z "$orig_scan" ] && orig_scan="0"
 
-    # 2. Check if wlan0 was actively communicating with or connected to an AP
-    local wpa_bin
-    wpa_bin=$(command -v wpa_cli 2>/dev/null || echo "/vendor/bin/wpa_cli")
-    local wpa_state
-    wpa_state=$("$wpa_bin" -i "$IFACE" -p "$WPA_SOCKET_DIR" status 2>/dev/null | grep "^wpa_state=" | cut -d= -f2)
-    local was_connected=0
-    if [ "$wpa_state" != "DISCONNECTED" ] && [ "$wpa_state" != "INACTIVE" ] && [ -n "$wpa_state" ]; then
-        was_connected=1
-    fi
-
-    # Save state to file so it persists across shell sessions
     cat <<EOF > "$STATE_FILE"
+WIFI_WAS_ENABLED=$was_enabled
 ORIG_SCAN_ALWAYS_ENABLED=$orig_scan
-WIFI_WAS_CONNECTED=$was_connected
 EOF
 
-    # 3. Disable framework background scanning services
+    # 1. Disable framework background scanning flags
     settings put global wifi_scan_always_enabled 0 2>/dev/null
     cmd wifi set-scan-always-available disabled >/dev/null 2>&1
     pkill -9 -f "cmd wifi start-scan" 2>/dev/null
 
-    # 4. Disconnect station from AP so single-PHY radio stays 100% locked on monitor channel
-    if [ "$was_connected" -eq 1 ]; then
-        echo "[*] Temporarily disconnecting station from AP to prevent channel time-slicing..."
-        "$wpa_bin" -i "$IFACE" -p "$WPA_SOCKET_DIR" disconnect >/dev/null 2>&1
-    fi
+    # 2. Disable Android Wi-Fi framework completely so wificond/HAL stop touching the chip
+    cmd wifi set-wifi-enabled disabled >/dev/null 2>&1 || true
+    sleep 0.8
+    killall -9 wpa_supplicant 2>/dev/null || true
 
-    # 5. Freeze native background scan daemons (wificond & wlan_assistant) to lock RF channel
-    local wcond_pid assist_pid
-    wcond_pid=$(pidof wificond 2>/dev/null)
-    [ -n "$wcond_pid" ] && kill -STOP $wcond_pid 2>/dev/null
-    assist_pid=$(pidof wlan_assistant 2>/dev/null)
-    [ -n "$assist_pid" ] && kill -STOP $assist_pid 2>/dev/null
+    # 3. Direct bare-metal power-on of MT6631/MT7663 baseband via wmtWifi chardev
+    echo 1 > /dev/wmtWifi 2>/dev/null || true
+    sleep 0.8
+
+    # 4. Bring up wlan0 under pure Linux control
+    ip link set "$IFACE" up 2>/dev/null || true
+    sleep 0.3
+
+    # 5. Spawn isolated standalone wpa_supplicant instance
+    mkdir -p "$WPA_SOCKET_DIR"
+    local isolated_conf="/data/local/tmp/airmon_isolated_wpa.conf"
+    cat << 'CONF' > "$isolated_conf"
+ctrl_interface=/data/vendor/wifi/wpa/sockets
+update_config=1
+CONF
+    chown -R wifi:wifi "$WPA_SOCKET_DIR" "$isolated_conf" 2>/dev/null || true
+    chmod 771 "$WPA_SOCKET_DIR" 2>/dev/null || true
+    /vendor/bin/hw/wpa_supplicant -O"$WPA_SOCKET_DIR" -c"$isolated_conf" -Dnl80211 -i"$IFACE" -B >/dev/null 2>&1 || true
+    sleep 1
 }
 
 restore_android_scanning() {
-    local ORIG_SCAN_ALWAYS_ENABLED="0"
-    local WIFI_WAS_CONNECTED="0"
+    local WIFI_WAS_ENABLED=1
+    local ORIG_SCAN_ALWAYS_ENABLED=0
     if [ -f "$STATE_FILE" ]; then
         . "$STATE_FILE" 2>/dev/null
         rm -f "$STATE_FILE"
     fi
 
-    echo "[*] Restoring Android network and scan configurations..."
+    echo "[*] Restoring official Android Wi-Fi stack & network managers..."
 
-    # 1. Resume native background scan daemons
-    local wcond_pid assist_pid
-    wcond_pid=$(pidof wificond 2>/dev/null)
-    [ -n "$wcond_pid" ] && kill -CONT $wcond_pid 2>/dev/null
-    assist_pid=$(pidof wlan_assistant 2>/dev/null)
-    [ -n "$assist_pid" ] && kill -CONT $assist_pid 2>/dev/null
+    # 1. Kill isolated supplicant and clean up
+    killall -9 wpa_supplicant 2>/dev/null || true
+    rm -f "/data/local/tmp/airmon_isolated_wpa.conf"
 
+    # 2. Power down direct wmtWifi chardev
+    echo 0 > /dev/wmtWifi 2>/dev/null || true
+    sleep 1
+
+    # 3. Restore Android framework settings
     settings put global wifi_scan_always_enabled "$ORIG_SCAN_ALWAYS_ENABLED" 2>/dev/null
     if [ "$ORIG_SCAN_ALWAYS_ENABLED" = "1" ]; then
         cmd wifi set-scan-always-available enabled >/dev/null 2>&1
     fi
 
-    # Always ensure station interface re-enables all saved networks and reconnects
-    echo "[*] Reconnecting station interface to saved Wi-Fi networks..."
-    local wpa_bin
-    wpa_bin=$(command -v wpa_cli 2>/dev/null || echo "/vendor/bin/wpa_cli")
-    "$wpa_bin" -i "$IFACE" -p "$WPA_SOCKET_DIR" enable_network all >/dev/null 2>&1
-    "$wpa_bin" -i "$IFACE" -p "$WPA_SOCKET_DIR" reconnect >/dev/null 2>&1
-    cmd wifi set-wifi-enabled disabled >/dev/null 2>&1
-    sleep 0.8
-    cmd wifi set-wifi-enabled enabled >/dev/null 2>&1
+    # 4. Re-enable official Android Wi-Fi framework if it was active
+    if [ "$WIFI_WAS_ENABLED" -eq 1 ]; then
+        echo "[*] Re-enabling Android Wi-Fi service..."
+        cmd wifi set-wifi-enabled enabled >/dev/null 2>&1
+    fi
 }
 
 start_keeper() {
@@ -150,19 +152,7 @@ start_monitor() {
 
     stop_hopper
 
-    # Check if wpa_supplicant socket is present; if not, auto-enable Wi-Fi
-    if [ ! -S "$WPA_SOCKET_DIR/$IFACE" ]; then
-        echo "[*] Wi-Fi control socket not found. Enabling Wi-Fi..."
-        svc wifi enable >/dev/null 2>&1
-        local tries=0
-        while [ $tries -lt 10 ]; do
-            if [ -S "$WPA_SOCKET_DIR/$IFACE" ]; then break; fi
-            sleep 0.5
-            tries=$((tries + 1))
-        done
-    fi
-
-    # Suppress Android background scanning & AP channel time-slicing
+    # Engage pure Linux isolation
     suppress_android_scanning
 
     local res=""
@@ -174,7 +164,7 @@ start_monitor() {
         retries=$((retries - 1))
     done
     if [ "$res" != "OK" ]; then
-        echo "[-] Driver command returned: '$res'. Make sure Wi-Fi is enabled." >&2
+        echo "[-] Driver command returned: '$res'." >&2
         restore_android_scanning
         return 1
     fi
@@ -211,7 +201,7 @@ start_monitor() {
     if ip link show "$MON_IFACE" >/dev/null 2>&1; then
         echo "[+] Interface $MON_IFACE created and UP."
         echo "[+] Baseband keep-alive active (zero idle periods)."
-        echo "[+] Channel locked: Android background scans suppressed."
+        echo "[+] Pure Linux isolation active: zero Android background interference."
         echo "[+] Ready for raw capture: tcpdump -i $MON_IFACE -n -e -vv"
     else
         echo "[-] Error: $MON_IFACE failed to appear in netdev list." >&2
@@ -233,7 +223,7 @@ stop_monitor() {
     # Restore Android network and background scan configurations
     restore_android_scanning
 
-    echo "[+] Monitor mode disabled."
+    echo "[+] Monitor mode disabled and system restored."
 }
 
 set_channel() {
