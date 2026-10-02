@@ -483,13 +483,23 @@ sniff_packets() {
         export LD_LIBRARY_PATH="/data/data/com.termux/files/usr/lib:$LD_LIBRARY_PATH"
 
         local airodump_opts=""
-        [ -n "$channel" ] && [ "$channel" != "all" ] && [ "$channel" != "hop" ] && airodump_opts="$airodump_opts -c $channel"
+        local hopping_started=0
+        if [ -n "$channel" ] && [ "$channel" != "all" ] && [ "$channel" != "hop" ]; then
+            airodump_opts="$airodump_opts -c $channel"
+        else
+            airodump_opts="$airodump_opts --band abg"
+            start_hopper 0.18 >/dev/null 2>&1
+            hopping_started=1
+        fi
         [ -n "$target_bssid" ] && airodump_opts="$airodump_opts --bssid $target_bssid"
         [ -n "$pcap_file" ] && airodump_opts="$airodump_opts -w ${pcap_file%.*}"
-        [ -z "$channel" ] && airodump_opts="$airodump_opts --band abg"
+
+        trap '[ "$hopping_started" -eq 1 ] && stop_hopper >/dev/null 2>&1; exit 0' INT TERM EXIT
 
         echo "[*] Launching live airodump-ng target scanner on $mon_dev..."
-        exec "$airodump_bin" $airodump_opts "$mon_dev"
+        "$airodump_bin" $airodump_opts "$mon_dev"
+        [ "$hopping_started" -eq 1 ] && stop_hopper >/dev/null 2>&1
+        return 0
     fi
 
     # If PCAP output is requested, use direct -w
