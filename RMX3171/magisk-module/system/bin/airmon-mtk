@@ -299,13 +299,178 @@ sniff_packets() {
     # Trap SIGINT / SIGTERM to ensure child processes are terminated
     trap 'pkill -P $$ 2>/dev/null; pkill -9 -f "tcpdump -i $mon_dev" 2>/dev/null; exit 0' INT TERM
 
-    local pcap="$1"
-    if [ -n "$pcap" ]; then
-        echo "[*] Capturing raw 802.11 frames to $pcap (Press Ctrl+C to stop)..."
-        exec tcpdump -i "$mon_dev" -w "$pcap" -s 0
+    # Defaults
+    local channel=""
+    local pcap_file=""
+    local target_bssid=""
+    local target_client=""
+    local frame_filter=""
+    local custom_filter=""
+    local packet_count=""
+    local verbosity="-vv"
+    local hex_dump=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -i|--iface)
+                mon_dev="$2"
+                shift 2
+                ;;
+            -c|--channel)
+                channel="$2"
+                shift 2
+                ;;
+            -w|--write|-o|--output)
+                pcap_file="$2"
+                shift 2
+                ;;
+            -b|--bssid)
+                target_bssid="$2"
+                shift 2
+                ;;
+            -d|--client)
+                target_client="$2"
+                shift 2
+                ;;
+            -n|-c-count|--count)
+                packet_count="$2"
+                shift 2
+                ;;
+            -v)
+                verbosity="-v"
+                shift
+                ;;
+            -vv)
+                verbosity="-vv"
+                shift
+                ;;
+            -vvv)
+                verbosity="-vvv"
+                shift
+                ;;
+            -q|--quiet)
+                verbosity=""
+                shift
+                ;;
+            -X|-XX|--hex)
+                hex_dump="-XX"
+                shift
+                ;;
+            --deauth)
+                frame_filter="wlan type mgt subtype deauth or wlan type mgt subtype disassoc"
+                shift
+                ;;
+            --beacon)
+                frame_filter="wlan type mgt subtype beacon or wlan type mgt subtype probe-req or wlan type mgt subtype probe-resp"
+                shift
+                ;;
+            --data)
+                frame_filter="wlan type data"
+                shift
+                ;;
+            --eapol|--handshake)
+                frame_filter="ether proto 0x888e"
+                shift
+                ;;
+            -f|--filter)
+                custom_filter="$2"
+                shift 2
+                ;;
+            -h|--help)
+                echo "Usage: airmon-sniff [options]"
+                echo "       airmon-mtk sniff [options]"
+                echo ""
+                echo "Default: Captures EVERY single 802.11 packet live (headers + signal + info)."
+                echo ""
+                echo "Options:"
+                echo "  -c <channel|all>  Lock to channel (1-14, 36-165) or sweep all (hop)"
+                echo "  -w <file.pcap>    Save raw frames to PCAP capture file"
+                echo "  -b <bssid>        Filter packets by AP BSSID / MAC address"
+                echo "  -d <client_mac>   Filter packets by client station MAC address"
+                echo "  -n <count>        Stop capture after receiving N packets"
+                echo "  -X, --hex         Show raw packet payload hex/ASCII dump"
+                echo "  -v, -vv, -vvv     Control detail/verbosity level (default: -vv)"
+                echo "  -q, --quiet       Brief output without verbose packet headers"
+                echo "  --deauth          Capture only Deauth and Disassociation frames"
+                echo "  --beacon          Capture only Beacons and Probe Requests/Responses"
+                echo "  --data            Capture only 802.11 Data frames"
+                echo "  --eapol           Capture only WPA/WPA2/WPA3 4-way handshake frames"
+                echo "  -f <bpf_filter>   Custom tcpdump/BPF filter expression"
+                echo "  -i <interface>    Monitor interface to use (default: $mon_dev)"
+                return 0
+                ;;
+            *)
+                if [ -z "$pcap_file" ] && [ "${1#-}" = "$1" ]; then
+                    pcap_file="$1"
+                    shift
+                else
+                    echo "[-] Unknown option: $1 (run with -h for help)" >&2
+                    return 1
+                fi
+                ;;
+        esac
+    done
+
+    # Handle channel selection
+    if [ "$channel" = "all" ] || [ "$channel" = "hop" ]; then
+        start_hopper
+    elif [ -n "$channel" ]; then
+        set_channel "$channel"
+    fi
+
+    # Construct BPF filter
+    local bpf=""
+    if [ -n "$target_bssid" ]; then
+        bpf="wlan addr1 $target_bssid or wlan addr2 $target_bssid or wlan addr3 $target_bssid"
+    fi
+    if [ -n "$target_client" ]; then
+        local client_bpf="wlan addr1 $target_client or wlan addr2 $target_client"
+        if [ -n "$bpf" ]; then
+            bpf="($bpf) and ($client_bpf)"
+        else
+            bpf="$client_bpf"
+        fi
+    fi
+    if [ -n "$frame_filter" ]; then
+        if [ -n "$bpf" ]; then
+            bpf="($bpf) and ($frame_filter)"
+        else
+            bpf="$frame_filter"
+        fi
+    fi
+    if [ -n "$custom_filter" ]; then
+        if [ -n "$bpf" ]; then
+            bpf="($bpf) and ($custom_filter)"
+        else
+            bpf="$custom_filter"
+        fi
+    fi
+
+    echo "============================================================"
+    echo "  MediaTek 802.11 Packet Sniffer (RMX3171 / gen4m)"
+    echo "============================================================"
+    echo "[*] Interface: $mon_dev"
+    if [ -f "$HOP_PID_FILE" ] && kill -0 "$(cat "$HOP_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        echo "[*] Channel:   HOPPING across all channels (1-13)"
     else
-        echo "[*] Streaming live 802.11 management frames (Press Ctrl+C to stop)..."
-        exec tcpdump -i "$mon_dev" -n -e -vv
+        echo "[*] Channel:   Active monitor channel"
+    fi
+    [ -n "$target_bssid" ] && echo "[*] AP Filter: BSSID $target_bssid"
+    [ -n "$target_client" ] && echo "[*] Client:    MAC $target_client"
+    [ -n "$frame_filter" ] && echo "[*] Frame Type: $frame_filter"
+    [ -n "$pcap_file" ] && echo "[*] Output:    Writing PCAP to $pcap_file"
+    [ -n "$bpf" ] && echo "[*] BPF Filter: '$bpf'"
+    echo "[*] Starting raw 802.11 packet capture (Press Ctrl+C to stop)..."
+    echo "------------------------------------------------------------"
+
+    # Ensure radio wake state
+    iw dev "$IFACE" set power_save off 2>/dev/null
+
+    # If PCAP output is requested, use direct -w
+    if [ -n "$pcap_file" ]; then
+        exec tcpdump -i "$mon_dev" -s 0 -w "$pcap_file" ${packet_count:+-c "$packet_count"} $bpf
+    else
+        exec tcpdump -i "$mon_dev" -n -e $verbosity $hex_dump ${packet_count:+-c "$packet_count"} $bpf
     fi
 }
 
@@ -356,7 +521,8 @@ case "$1" in
         start_hopper "$2"
         ;;
     sniff)
-        sniff_packets "$2"
+        shift
+        sniff_packets "$@"
         ;;
     status)
         show_status
