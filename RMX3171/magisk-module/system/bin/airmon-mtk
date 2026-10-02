@@ -60,6 +60,13 @@ EOF
         echo "[*] Temporarily disconnecting station from AP to prevent channel time-slicing..."
         "$wpa_bin" -i "$IFACE" -p "$WPA_SOCKET_DIR" disconnect >/dev/null 2>&1
     fi
+
+    # 5. Freeze native background scan daemons (wificond & wlan_assistant) to lock RF channel
+    local wcond_pid assist_pid
+    wcond_pid=$(pidof wificond 2>/dev/null)
+    [ -n "$wcond_pid" ] && kill -STOP $wcond_pid 2>/dev/null
+    assist_pid=$(pidof wlan_assistant 2>/dev/null)
+    [ -n "$assist_pid" ] && kill -STOP $assist_pid 2>/dev/null
 }
 
 restore_android_scanning() {
@@ -71,6 +78,14 @@ restore_android_scanning() {
     fi
 
     echo "[*] Restoring Android network and scan configurations..."
+
+    # 1. Resume native background scan daemons
+    local wcond_pid assist_pid
+    wcond_pid=$(pidof wificond 2>/dev/null)
+    [ -n "$wcond_pid" ] && kill -CONT $wcond_pid 2>/dev/null
+    assist_pid=$(pidof wlan_assistant 2>/dev/null)
+    [ -n "$assist_pid" ] && kill -CONT $assist_pid 2>/dev/null
+
     settings put global wifi_scan_always_enabled "$ORIG_SCAN_ALWAYS_ENABLED" 2>/dev/null
     if [ "$ORIG_SCAN_ALWAYS_ENABLED" = "1" ]; then
         cmd wifi set-scan-always-available enabled >/dev/null 2>&1
@@ -226,9 +241,15 @@ set_channel() {
     local bw="${2:-20}"
 
     if [ -z "$channel" ]; then
-        echo "[-] Usage: airmon-mtk set-channel <channel> [20|40]" >&2
+        echo "[-] Usage: airmon-mtk channel <channel> [20|40]" >&2
         return 1
     fi
+
+    # 1. Stop background channel hopper if active
+    stop_hopper
+
+    # 2. Ensure Android background scans are frozen
+    suppress_android_scanning
 
     local res
     res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
