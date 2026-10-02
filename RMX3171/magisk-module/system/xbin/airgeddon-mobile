@@ -280,11 +280,15 @@ run_timed_scan() {
     "$airodump_bin" "$mon_dev" --background 1 --write-interval 1 --output-format csv -w "$scan_base" < /dev/null >/dev/null 2>&1 &
     local dump_pid=$!
 
+    # Send active probe pulse to force battery-saving mobile hotspots & quiet APs to reply instantly
+    wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets scan >/dev/null 2>&1
+
     # Active countdown progress bar
     local elapsed=0
     while [ "$elapsed" -lt "$dur" ] && kill -0 "$dump_pid" 2>/dev/null; do
         sleep 1
         elapsed=$((elapsed + 1))
+        [ "$elapsed" -eq 4 ] && wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets scan >/dev/null 2>&1
         local rem=$((dur - elapsed))
         [ "$rem" -lt 0 ] && rem=0
         echo -en "\r${C_CYN}[*] Scanning radio spectrum... ${C_YLW}${rem}s remaining${C_RST}  "
