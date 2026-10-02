@@ -34,6 +34,18 @@ check_root() {
     fi
 }
 
+# Direct CLI flag: airgeddon-mobile --airodump
+if [ "$1" = "--airodump" ] || [ "$1" = "--scan" ] || [ "$1" = "-s" ]; then
+    check_root
+    m_iface=$(ip link show mon0 >/dev/null 2>&1 && echo "mon0" || ip link show wlan0mon >/dev/null 2>&1 && echo "wlan0mon" || echo "")
+    if [ -z "$m_iface" ]; then
+        echo -e "${C_CYN}[*] Initializing monitor mode...${C_RST}"
+        airmon-mtk start >/dev/null 2>&1
+    fi
+    shift
+    exec airmon-sniff --airodump "$@"
+fi
+
 get_mon_iface() {
     if ip link show mon0 >/dev/null 2>&1; then
         echo "mon0"
@@ -174,82 +186,103 @@ menu_network_scanner() {
         mon_dev=$(get_mon_iface)
     fi
 
-    local scan_csv="/data/local/tmp/airgeddon_scan"
-    rm -f "${scan_csv}"* 2>/dev/null
+    while true; do
+        print_header
+        echo -e "${C_WHT}--- [2] Target Network Recon (Scanner) ---${C_RST}"
+        echo -e " ${C_CYN}1)${C_RST} Live Airodump-ng Screen (Interactive real-time AP & Client monitor)"
+        echo -e " ${C_CYN}2)${C_RST} Timed Recon Scan & Target AP Selector (10s discovery window)"
+        echo -e " ${C_CYN}0)${C_RST} Back to Main Menu"
+        echo ""
+        echo -en "${C_YLW}Select option [0-2]: ${C_RST}"
+        read -r s_choice
 
-    print_header
-    echo -e "${C_WHT}--- [2] Target Network Recon (Scanner) ---${C_RST}"
-    echo -e "${C_CYN}[*] Launching live Access Point discovery on $mon_dev...${C_RST}"
-    echo -e "${C_YLW}[*] Scanning will run for 10 seconds (or press Ctrl+C to finish early).${C_RST}\n"
+        case "$s_choice" in
+            1)
+                echo -e "\n${C_CYN}[*] Launching live interactive airodump-ng screen (Press Ctrl+C to return)...${C_RST}"
+                airmon-sniff --airodump
+                pause
+                ;;
+            2)
+                local scan_csv="/data/local/tmp/airgeddon_scan"
+                rm -f "${scan_csv}"* 2>/dev/null
 
-    # Start channel hopper if not already running
-    local started_hop=0
-    if [ ! -f "/data/local/tmp/airmon_mtk_hop.pid" ] || ! kill -0 "$(cat /data/local/tmp/airmon_mtk_hop.pid 2>/dev/null)" 2>/dev/null; then
-        airmon-mtk hop 0.15 >/dev/null 2>&1
-        started_hop=1
-    fi
+                print_header
+                echo -e "${C_WHT}--- Timed AP Discovery & Selector ---${C_RST}"
+                echo -e "${C_CYN}[*] Launching Access Point discovery on $mon_dev...${C_RST}"
+                echo -e "${C_YLW}[*] Scanning for 10 seconds (or press Ctrl+C to finish early)...${C_RST}\n"
 
-    # Run airodump-ng with timeout
-    timeout 10 /data/data/com.termux/files/usr/bin/airodump-ng "$mon_dev" --output-format csv -w "$scan_csv" >/dev/null 2>&1
+                local started_hop=0
+                if [ ! -f "/data/local/tmp/airmon_mtk_hop.pid" ] || ! kill -0 "$(cat /data/local/tmp/airmon_mtk_hop.pid 2>/dev/null)" 2>/dev/null; then
+                    airmon-mtk hop 0.15 >/dev/null 2>&1
+                    started_hop=1
+                fi
 
-    [ "$started_hop" -eq 1 ] && airmon-mtk stop-hop >/dev/null 2>&1
+                timeout 10 /data/data/com.termux/files/usr/bin/airodump-ng "$mon_dev" --output-format csv -w "$scan_csv" >/dev/null 2>&1
+                [ "$started_hop" -eq 1 ] && airmon-mtk stop-hop >/dev/null 2>&1
 
-    local csv_file="${scan_csv}-01.csv"
-    if [ ! -f "$csv_file" ]; then
-        echo -e "${C_RED}[-] No scan data captured.${C_RST}"
-        pause
-        return
-    fi
+                local csv_file="${scan_csv}-01.csv"
+                if [ ! -f "$csv_file" ]; then
+                    echo -e "${C_RED}[-] No scan data captured.${C_RST}"
+                    pause
+                    continue
+                fi
 
-    # Parse and display target list
-    print_header
-    echo -e "${C_WHT}--- Discovered Access Points ---${C_RST}"
-    printf "${C_CYN}%-3s %-18s %-4s %-5s %-8s %-20s${C_RST}\n" "NUM" "BSSID" "CH" "PWR" "ENC" "ESSID"
-    echo -e "${C_DIM}--------------------------------------------------------------${C_RST}"
+                print_header
+                echo -e "${C_WHT}--- Discovered Access Points ---${C_RST}"
+                printf "${C_CYN}%-3s %-18s %-4s %-5s %-8s %-20s${C_RST}\n" "NUM" "BSSID" "CH" "PWR" "ENC" "ESSID"
+                echo -e "${C_DIM}--------------------------------------------------------------${C_RST}"
 
-    local count=0
-    # Process CSV up to "Station MAC"
-    awk -F',' '
-    BEGIN { in_ap=0; idx=0 }
-    /BSSID, First time seen/ { in_ap=1; next }
-    /Station MAC/ { in_ap=0; exit }
-    in_ap && NF >= 14 && $1 !~ /^[[:space:]]*$/ {
-        idx++;
-        bssid=$1; gsub(/^[ \t]+|[ \t]+$/, "", bssid);
-        ch=$4; gsub(/^[ \t]+|[ \t]+$/, "", ch);
-        pwr=$9; gsub(/^[ \t]+|[ \t]+$/, "", pwr);
-        enc=$6; gsub(/^[ \t]+|[ \t]+$/, "", enc);
-        essid=$14; gsub(/^[ \t]+|[ \t]+$/, "", essid);
-        printf "%-3d|%-18s|%-4s|%-5s|%-8s|%s\n", idx, bssid, ch, pwr, enc, essid;
-    }' "$csv_file" > /data/local/tmp/ap_parsed.txt
+                local count=0
+                awk -F',' '
+                BEGIN { in_ap=0; idx=0 }
+                /BSSID, First time seen/ { in_ap=1; next }
+                /Station MAC/ { in_ap=0; exit }
+                in_ap && NF >= 14 && $1 !~ /^[[:space:]]*$/ {
+                    idx++;
+                    bssid=$1; gsub(/^[ \t]+|[ \t]+$/, "", bssid);
+                    ch=$4; gsub(/^[ \t]+|[ \t]+$/, "", ch);
+                    pwr=$9; gsub(/^[ \t]+|[ \t]+$/, "", pwr);
+                    enc=$6; gsub(/^[ \t]+|[ \t]+$/, "", enc);
+                    essid=$14; gsub(/^[ \t]+|[ \t]+$/, "", essid);
+                    printf "%-3d|%-18s|%-4s|%-5s|%-8s|%s\n", idx, bssid, ch, pwr, enc, essid;
+                }' "$csv_file" > /data/local/tmp/ap_parsed.txt
 
-    if [ ! -s /data/local/tmp/ap_parsed.txt ]; then
-        echo -e "${C_YLW}[!] No APs discovered in this scan window.${C_RST}"
-        pause
-        return
-    fi
+                if [ ! -s /data/local/tmp/ap_parsed.txt ]; then
+                    echo -e "${C_YLW}[!] No APs discovered in this scan window.${C_RST}"
+                    pause
+                    continue
+                fi
 
-    while IFS='|' read -r num bssid ch pwr enc essid; do
-        printf "${C_YLW}%-3s${C_RST} %-18s ${C_GRN}%-4s${C_RST} %-5s %-8s ${C_WHT}%-20s${C_RST}\n" "$num" "$bssid" "$ch" "$pwr" "$enc" "$essid"
-        count=$((count + 1))
-    done < /data/local/tmp/ap_parsed.txt
+                while IFS='|' read -r num bssid ch pwr enc essid; do
+                    printf "${C_YLW}%-3s${C_RST} %-18s ${C_GRN}%-4s${C_RST} %-5s %-8s ${C_WHT}%-20s${C_RST}\n" "$num" "$bssid" "$ch" "$pwr" "$enc" "$essid"
+                    count=$((count + 1))
+                done < /data/local/tmp/ap_parsed.txt
 
-    echo -e "${C_DIM}--------------------------------------------------------------${C_RST}"
-    echo -en "${C_YLW}Select AP target number [1-$count] (or 0 to cancel): ${C_RST}"
-    read -r ap_sel
+                echo -e "${C_DIM}--------------------------------------------------------------${C_RST}"
+                echo -en "${C_YLW}Select AP target number [1-$count] (or 0 to cancel): ${C_RST}"
+                read -r ap_sel
 
-    if [ -n "$ap_sel" ] && [ "$ap_sel" -gt 0 ] 2>/dev/null && [ "$ap_sel" -le "$count" ] 2>/dev/null; then
-        local selected_line
-        selected_line=$(grep "^$ap_sel|" /data/local/tmp/ap_parsed.txt)
-        SELECTED_BSSID=$(echo "$selected_line" | cut -d'|' -f2)
-        SELECTED_CH=$(echo "$selected_line" | cut -d'|' -f3)
-        SELECTED_ESSID=$(echo "$selected_line" | cut -d'|' -f6)
-        
-        # Lock radio to this channel
-        airmon-mtk channel "$SELECTED_CH" >/dev/null 2>&1
-        echo -e "\n${C_GRN}[+] Target set to: $SELECTED_ESSID ($SELECTED_BSSID) on CH $SELECTED_CH.${C_RST}"
-    fi
-    pause
+                if [ -n "$ap_sel" ] && [ "$ap_sel" -gt 0 ] 2>/dev/null && [ "$ap_sel" -le "$count" ] 2>/dev/null; then
+                    local selected_line
+                    selected_line=$(grep "^$ap_sel|" /data/local/tmp/ap_parsed.txt)
+                    SELECTED_BSSID=$(echo "$selected_line" | cut -d'|' -f2)
+                    SELECTED_CH=$(echo "$selected_line" | cut -d'|' -f3)
+                    SELECTED_ESSID=$(echo "$selected_line" | cut -d'|' -f6)
+                    
+                    airmon-mtk channel "$SELECTED_CH" >/dev/null 2>&1
+                    echo -e "\n${C_GRN}[+] Target set to: $SELECTED_ESSID ($SELECTED_BSSID) on CH $SELECTED_CH.${C_RST}"
+                fi
+                pause
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${C_RED}[!] Invalid choice.${C_RST}"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 # Module 3: Packet Sniffer & Handshake Grabber
