@@ -10,6 +10,7 @@ Tested and verified with an external physical hardware sniffer (ESP32 listening 
 
 ```
 .
+├── boot_sig_patcher.py          # Android boot.img kernel module signature verification bypass
 ├── driver-warp/                 # Automated binary patcher and code cave injection engine
 │   ├── patcher.py               # Complete AArch64 instruction patcher and assembler
 │   └── test_deploy.sh           # Hot-reload validation script
