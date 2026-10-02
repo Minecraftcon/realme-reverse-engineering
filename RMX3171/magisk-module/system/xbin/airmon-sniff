@@ -1,0 +1,6 @@
+#!/bin/sh
+# airmon-sniff: Direct 802.11 Packet Sniffer wrapper for Realme Narzo 30A / MT6768
+# Captures every single packet by default, with rich customization flags.
+
+AIRMON_BIN="$(command -v airmon-mtk 2>/dev/null || echo '/system/bin/airmon-mtk')"
+exec "$AIRMON_BIN" sniff "$@"
