@@ -1,0 +1,244 @@
+#!/bin/sh
+# airmon-inject: 802.11 Packet Injector & Frame Transmitter
+# Designed for MediaTek MT6768 (Helio G85) / Realme Narzo 30A (RMX3171)
+# Works seamlessly with warped wlan_drv_gen4m.ko & standard aircrack tools.
+
+export PATH="/data/adb/modules/mtk-aircrack-core/system/bin:/system/xbin:/data/data/com.termux/files/usr/bin:/system_ext/bin:/system/bin:/vendor/bin:$PATH"
+export LD_LIBRARY_PATH="/data/data/com.termux/files/usr/lib:$LD_LIBRARY_PATH"
+
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        echo "[-] Error: airmon-inject must be run as root." >&2
+        exit 1
+    fi
+}
+
+check_root
+
+# Default interface detection
+MON_DEV="mon0"
+if ip link show mon0 >/dev/null 2>&1; then
+    MON_DEV="mon0"
+elif ip link show wlan0mon >/dev/null 2>&1; then
+    MON_DEV="wlan0mon"
+elif ip link show radiotap0 >/dev/null 2>&1; then
+    MON_DEV="radiotap0"
+fi
+
+AIREPLAY_BIN="/data/data/com.termux/files/usr/bin/aireplay-ng"
+if [ ! -x "$AIREPLAY_BIN" ]; then
+    AIREPLAY_BIN="$(command -v aireplay-ng 2>/dev/null)"
+fi
+
+show_help() {
+    echo "============================================================"
+    echo "  MediaTek 802.11 Packet Injector (RMX3171 / gen4m)"
+    echo "============================================================"
+    echo "Usage: airmon-inject [mode] [options]"
+    echo ""
+    echo "Modes:"
+    echo "  -9, --test                 Test injection capability against AP"
+    echo "  -0, --deauth               Transmit 802.11 Deauth / Disassoc frames"
+    echo "  -1, --fakeauth             Perform Fake Authentication with AP"
+    echo "  -3, --arp                  Perform ARP Request Replay"
+    echo "  -r, --raw <hex_bytes>      Send raw custom 802.11 hex frame"
+    echo ""
+    echo "Options:"
+    echo "  -a, --bssid <mac>          Target AP BSSID / MAC address (Required for deauth/fakeauth)"
+    echo "  -d, --client <mac>         Target client station MAC (Default: ff:ff:ff:ff:ff:ff)"
+    echo "  -s, --source <mac>         Source MAC to spoof"
+    echo "  -c, --channel <channel>    Switch channel before injecting"
+    echo "  -n, --count <num>          Number of frames to transmit (Default: 10)"
+    echo "  -i, --iface <dev>          Monitor interface (Default: $MON_DEV)"
+    echo "  -h, --help                 Display this help message"
+    echo ""
+    echo "Examples:"
+    echo "  airmon-inject --test"
+    echo "  airmon-inject --test -a aa:43:29:83:7b:7b -c 1"
+    echo "  airmon-inject --deauth -a aa:43:29:83:7b:7b -d 24:b2:b9:49:23:25 -n 15"
+    echo "  airmon-inject --deauth -a aa:43:29:83:7b:7b -n 5"
+    echo "============================================================"
+}
+
+if [ $# -eq 0 ]; then
+    show_help
+    exit 0
+fi
+
+# Parse CLI options
+MODE=""
+TARGET_AP=""
+TARGET_CLIENT=""
+SOURCE_MAC=""
+CHANNEL=""
+COUNT=10
+RAW_HEX=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -9|--test|test)
+            MODE="test"
+            shift
+            ;;
+        -0|--deauth|deauth)
+            MODE="deauth"
+            shift
+            ;;
+        -1|--fakeauth|fakeauth)
+            MODE="fakeauth"
+            shift
+            ;;
+        -3|--arp|arp)
+            MODE="arp"
+            shift
+            ;;
+        -r|--raw|raw)
+            MODE="raw"
+            RAW_HEX="$2"
+            shift 2
+            ;;
+        -a|--bssid|-b)
+            TARGET_AP="$2"
+            shift 2
+            ;;
+        -d|--client|-c-client)
+            TARGET_CLIENT="$2"
+            shift 2
+            ;;
+        -s|--source)
+            SOURCE_MAC="$2"
+            shift 2
+            ;;
+        -c|--channel)
+            CHANNEL="$2"
+            shift 2
+            ;;
+        -n|--count)
+            COUNT="$2"
+            shift 2
+            ;;
+        -i|--iface)
+            MON_DEV="$2"
+            shift 2
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "[-] Unknown option: $1" >&2
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# Ensure monitor interface is up
+if ! ip link show "$MON_DEV" >/dev/null 2>&1; then
+    echo "[!] $MON_DEV is not UP. Initializing monitor mode..."
+    airmon-mtk start
+    if ip link show mon0 >/dev/null 2>&1; then
+        MON_DEV="mon0"
+    elif ip link show wlan0mon >/dev/null 2>&1; then
+        MON_DEV="wlan0mon"
+    fi
+fi
+
+# Ensure power save is off
+iw dev wlan0 set power_save off 2>/dev/null
+echo "airmon_wake" > /sys/power/wake_lock 2>/dev/null
+
+# Tune channel if specified
+if [ -n "$CHANNEL" ]; then
+    airmon-mtk channel "$CHANNEL" 2>/dev/null || wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "MONITOR 1 $CHANNEL 20 0" >/dev/null 2>&1
+    echo "$CHANNEL" > /data/local/tmp/airmon_channel 2>/dev/null
+fi
+
+get_tx_packets() {
+    ip -s link show "$MON_DEV" | awk '/TX:/{getline; print $2}' 2>/dev/null || echo 0
+}
+
+TX_BEFORE=$(get_tx_packets)
+
+echo "============================================================"
+echo "  MediaTek 802.11 Frame Transmitter (RMX3171)"
+echo "============================================================"
+echo "[*] Interface:  $MON_DEV"
+[ -n "$CHANNEL" ] && echo "[*] Channel:    $CHANNEL"
+[ -n "$TARGET_AP" ] && echo "[*] Target AP:  $TARGET_AP"
+[ -n "$TARGET_CLIENT" ] && echo "[*] Client:     ${TARGET_CLIENT:-ff:ff:ff:ff:ff:ff (Broadcast)}"
+echo "[*] Initial TX: $TX_BEFORE packets sent"
+echo "------------------------------------------------------------"
+
+case "$MODE" in
+    test)
+        echo "[*] Running Injection / Probe-Response Test..."
+        if [ -n "$TARGET_AP" ]; then
+            "$AIREPLAY_BIN" -9 -D -a "$TARGET_AP" "$MON_DEV"
+        else
+            "$AIREPLAY_BIN" -9 -D "$MON_DEV"
+        fi
+        ;;
+    deauth)
+        if [ -z "$TARGET_AP" ]; then
+            echo "[-] Error: Target AP BSSID (-a <mac>) is required for deauth mode." >&2
+            exit 1
+        fi
+        CLIENT_ARG=""
+        if [ -n "$TARGET_CLIENT" ] && [ "$TARGET_CLIENT" != "ff:ff:ff:ff:ff:ff" ]; then
+            CLIENT_ARG="-c $TARGET_CLIENT"
+        fi
+        echo "[*] Transmitting $COUNT Deauth / Disassoc frames..."
+        "$AIREPLAY_BIN" -0 "$COUNT" -D -a "$TARGET_AP" $CLIENT_ARG "$MON_DEV"
+        ;;
+    fakeauth)
+        if [ -z "$TARGET_AP" ]; then
+            echo "[-] Error: Target AP BSSID (-a <mac>) is required for fakeauth mode." >&2
+            exit 1
+        fi
+        echo "[*] Sending Fake Authentication request..."
+        SRC_ARG=""
+        [ -n "$SOURCE_MAC" ] && SRC_ARG="-h $SOURCE_MAC"
+        "$AIREPLAY_BIN" -1 0 -D -a "$TARGET_AP" $SRC_ARG "$MON_DEV"
+        ;;
+    arp)
+        if [ -z "$TARGET_AP" ]; then
+            echo "[-] Error: Target AP BSSID (-a <mac>) is required for ARP replay." >&2
+            exit 1
+        fi
+        echo "[*] Starting ARP Request Replay..."
+        SRC_ARG=""
+        [ -n "$SOURCE_MAC" ] && SRC_ARG="-h $SOURCE_MAC"
+        "$AIREPLAY_BIN" -3 -D -b "$TARGET_AP" $SRC_ARG "$MON_DEV"
+        ;;
+    raw)
+        if [ -z "$RAW_HEX" ]; then
+            echo "[-] Error: Hex bytes required for raw frame mode (-r <hex>)." >&2
+            exit 1
+        fi
+        echo "[*] Injecting raw 802.11 frame via Python AF_PACKET socket..."
+        python3 -c '
+import sys, socket, binascii
+iface = sys.argv[1]
+hex_data = sys.argv[2].replace(" ", "").replace(":", "")
+pkt = binascii.unhexlify(hex_data)
+count = int(sys.argv[3])
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+s.bind((iface, 0))
+for i in range(count):
+    s.send(pkt)
+s.close()
+print(f"[+] Successfully injected {count} raw frame(s) into {iface}.")
+' "$MON_DEV" "$RAW_HEX" "$COUNT"
+        ;;
+    *)
+        echo "[-] No valid injection mode selected. Use -h for help." >&2
+        exit 1
+        ;;
+esac
+
+TX_AFTER=$(get_tx_packets)
+DIFF=$(( TX_AFTER - TX_BEFORE ))
+echo "------------------------------------------------------------"
+echo "[+] Total TX packets after run: $TX_AFTER (Delta: +$DIFF packets transmitted by PHY)"
+echo "============================================================"

@@ -254,6 +254,7 @@ set_channel() {
     local res
     res=$(send_driver_cmd "MONITOR 1 $channel $bw 0")
     if [ "$res" = "OK" ]; then
+        echo "$channel" > /data/local/tmp/airmon_channel 2>/dev/null
         echo "[+] Switched $MON_IFACE to Channel $channel (${bw}MHz)."
     else
         echo "[-] Failed to switch channel: '$res'" >&2

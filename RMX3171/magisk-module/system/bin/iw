@@ -54,9 +54,23 @@ fi
 if [ "$TARGET" = "wlan0mon" ] || [ "$TARGET" = "radiotap0" ] || [ "$TARGET" = "mon0" ]; then
     case "$CMD" in
         info)
+            ch=1
+            if [ -f "/data/local/tmp/airmon_channel" ]; then
+                ch=$(cat /data/local/tmp/airmon_channel 2>/dev/null)
+            fi
+            ch="${ch:-1}"
+            freq=2412
+            if [ "$ch" -eq 14 ]; then
+                freq=2484
+            elif [ "$ch" -ge 1 ] && [ "$ch" -le 13 ]; then
+                freq=$(( 2407 + (ch * 5) ))
+            elif [ "$ch" -ge 36 ] && [ "$ch" -le 165 ]; then
+                freq=$(( 5000 + (ch * 5) ))
+            fi
             echo "Interface $TARGET"
             echo "	type monitor"
             echo "	wiphy 0"
+            echo "	channel $ch ($freq MHz), width: 20 MHz, center1: $freq MHz"
             exit 0
             ;;
         set)

@@ -1,0 +1,504 @@
+#!/bin/sh
+# airgeddon-mobile: Lightweight, Mobile-Optimized Wireless Auditing Suite
+# Tailored for Realme Narzo 30A (MediaTek MT6768) & Android Devices
+# Built to work directly on mobile screens (Termux / ADB / Root Shell)
+
+export PATH="/data/adb/modules/mtk-aircrack-core/system/bin:/system/xbin:/data/data/com.termux/files/usr/bin:/system_ext/bin:/system/bin:/vendor/bin:$PATH"
+export LD_LIBRARY_PATH="/data/data/com.termux/files/usr/lib:$LD_LIBRARY_PATH"
+export TERM="${TERM:-xterm-256color}"
+
+# Colors
+C_RED="\033[1;31m"
+C_GRN="\033[1;32m"
+C_YLW="\033[1;33m"
+C_BLU="\033[1;34m"
+C_MAG="\033[1;35m"
+C_CYN="\033[1;36m"
+C_WHT="\033[1;37m"
+C_DIM="\033[2m"
+C_RST="\033[0m"
+
+# State variables
+SELECTED_BSSID=""
+SELECTED_ESSID=""
+SELECTED_CH="1"
+SELECTED_CLIENT="ff:ff:ff:ff:ff:ff"
+HANDSHAKE_DIR="/sdcard/airgeddon_captures"
+mkdir -p "$HANDSHAKE_DIR" 2>/dev/null || HANDSHAKE_DIR="/data/local/tmp/airgeddon_captures"
+mkdir -p "$HANDSHAKE_DIR" 2>/dev/null
+
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${C_RED}[-] Error: airgeddon-mobile must be run as root (su).${C_RST}" >&2
+        exit 1
+    fi
+}
+
+get_mon_iface() {
+    if ip link show mon0 >/dev/null 2>&1; then
+        echo "mon0"
+    elif ip link show wlan0mon >/dev/null 2>&1; then
+        echo "wlan0mon"
+    elif ip link show radiotap0 >/dev/null 2>&1; then
+        echo "radiotap0"
+    else
+        echo ""
+    fi
+}
+
+get_active_channel() {
+    if [ -f "/data/local/tmp/airmon_mtk_hop.pid" ] && kill -0 "$(cat /data/local/tmp/airmon_mtk_hop.pid 2>/dev/null)" 2>/dev/null; then
+        echo "HOPPING (1-13)"
+    elif [ -f "/data/local/tmp/airmon_channel" ]; then
+        cat /data/local/tmp/airmon_channel 2>/dev/null
+    else
+        echo "1"
+    fi
+}
+
+get_tx_stats() {
+    local iface="$1"
+    [ -z "$iface" ] && return
+    ip -s link show "$iface" 2>/dev/null | awk '/TX:/{getline; print $1"B / "$2" pkts"}'
+}
+
+get_rx_stats() {
+    local iface="$1"
+    [ -z "$iface" ] && return
+    ip -s link show "$iface" 2>/dev/null | awk '/RX:/{getline; print $1"B / "$2" pkts"}'
+}
+
+print_header() {
+    clear
+    local mon_dev
+    mon_dev=$(get_mon_iface)
+    local cur_ch
+    cur_ch=$(get_active_channel)
+
+    echo -e "${C_CYN}==============================================================${C_RST}"
+    echo -e "${C_WHT}           AIRGEDDON MOBILE  ${C_CYN}[MediaTek MT6768]${C_RST}"
+    echo -e "${C_DIM}     Lightweight 802.11 Auditing Suite for Android${C_RST}"
+    echo -e "${C_CYN}==============================================================${C_RST}"
+    
+    if [ -n "$mon_dev" ]; then
+        local tx_stat
+        tx_stat=$(get_tx_stats "$mon_dev")
+        echo -e " ${C_GRN}[●] Monitor Mode:${C_RST} ${C_WHT}$mon_dev (ACTIVE)${C_RST}  | ${C_CYN}CH:${C_RST} ${C_YLW}$cur_ch${C_RST}"
+        echo -e " ${C_GRN}[↑] TX Packets:${C_RST}   ${C_WHT}${tx_stat:-0 pkts}${C_RST} (Injection Ready)"
+    else
+        echo -e " ${C_RED}[○] Monitor Mode:${C_RST} ${C_DIM}INACTIVE (wlan0 managed)${C_RST}"
+    fi
+
+    if [ -n "$SELECTED_BSSID" ]; then
+        echo -e " ${C_MAG}[★] Target AP:${C_RST}    ${C_WHT}$SELECTED_ESSID${C_RST} [${C_YLW}$SELECTED_BSSID${C_RST}] CH: ${C_GRN}$SELECTED_CH${C_RST}"
+        [ -n "$SELECTED_CLIENT" ] && [ "$SELECTED_CLIENT" != "ff:ff:ff:ff:ff:ff" ] && echo -e " ${C_MAG}[★] Target Client:${C_RST}${C_WHT} $SELECTED_CLIENT${C_RST}"
+    fi
+    echo -e "${C_CYN}--------------------------------------------------------------${C_RST}"
+}
+
+pause() {
+    echo ""
+    echo -en "${C_DIM}Press [Enter] to continue...${C_RST}"
+    read -r _
+}
+
+# Module 1: Monitor & Radio Control
+menu_radio_control() {
+    while true; do
+        print_header
+        echo -e "${C_WHT}--- [1] Monitor Mode & Radio Control ---${C_RST}"
+        echo -e " ${C_CYN}1)${C_RST} Start Monitor Mode (mon0)"
+        echo -e " ${C_CYN}2)${C_RST} Stop Monitor Mode (restore wlan0)"
+        echo -e " ${C_CYN}3)${C_RST} Switch Channel (1-14, 36-165)"
+        echo -e " ${C_CYN}4)${C_RST} Toggle Channel Hopper (1-13 continuous sweep)"
+        echo -e " ${C_CYN}5)${C_RST} Wake Radio / Refresh Power Lock"
+        echo -e " ${C_CYN}0)${C_RST} Back to Main Menu"
+        echo ""
+        echo -en "${C_YLW}Select option [0-5]: ${C_RST}"
+        read -r choice
+        case "$choice" in
+            1)
+                echo -e "\n${C_CYN}[*] Starting monitor mode...${C_RST}"
+                airmon-mtk start
+                pause
+                ;;
+            2)
+                echo -e "\n${C_CYN}[*] Stopping monitor mode and restoring Android Wi-Fi...${C_RST}"
+                airmon-mtk stop
+                pause
+                ;;
+            3)
+                echo -en "\n${C_YLW}Enter channel number (1-14 for 2.4GHz, 36-165 for 5GHz): ${C_RST}"
+                read -r ch
+                if [ -n "$ch" ]; then
+                    airmon-mtk channel "$ch"
+                    SELECTED_CH="$ch"
+                fi
+                pause
+                ;;
+            4)
+                if [ -f "/data/local/tmp/airmon_mtk_hop.pid" ] && kill -0 "$(cat /data/local/tmp/airmon_mtk_hop.pid 2>/dev/null)" 2>/dev/null; then
+                    echo -e "\n${C_CYN}[*] Stopping channel hopper...${C_RST}"
+                    airmon-mtk stop-hop
+                else
+                    echo -e "\n${C_CYN}[*] Starting high-speed channel hopper...${C_RST}"
+                    airmon-mtk hop 0.15
+                fi
+                pause
+                ;;
+            5)
+                echo -e "\n${C_CYN}[*] Acquiring wake lock & disabling Wi-Fi power save...${C_RST}"
+                iw dev wlan0 set power_save off 2>/dev/null
+                echo "airmon_wake" > /sys/power/wake_lock 2>/dev/null
+                echo -e "${C_GRN}[+] Radio wake lock held.${C_RST}"
+                pause
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${C_RED}[!] Invalid choice.${C_RST}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# Module 2: Network Scanner (AP Recon)
+menu_network_scanner() {
+    local mon_dev
+    mon_dev=$(get_mon_iface)
+    if [ -z "$mon_dev" ]; then
+        echo -e "\n${C_RED}[!] Monitor interface not active. Starting it now...${C_RST}"
+        airmon-mtk start
+        mon_dev=$(get_mon_iface)
+    fi
+
+    local scan_csv="/data/local/tmp/airgeddon_scan"
+    rm -f "${scan_csv}"* 2>/dev/null
+
+    print_header
+    echo -e "${C_WHT}--- [2] Target Network Recon (Scanner) ---${C_RST}"
+    echo -e "${C_CYN}[*] Launching live Access Point discovery on $mon_dev...${C_RST}"
+    echo -e "${C_YLW}[*] Scanning will run for 10 seconds (or press Ctrl+C to finish early).${C_RST}\n"
+
+    # Start channel hopper if not already running
+    local started_hop=0
+    if [ ! -f "/data/local/tmp/airmon_mtk_hop.pid" ] || ! kill -0 "$(cat /data/local/tmp/airmon_mtk_hop.pid 2>/dev/null)" 2>/dev/null; then
+        airmon-mtk hop 0.15 >/dev/null 2>&1
+        started_hop=1
+    fi
+
+    # Run airodump-ng with timeout
+    timeout 10 /data/data/com.termux/files/usr/bin/airodump-ng "$mon_dev" --output-format csv -w "$scan_csv" >/dev/null 2>&1
+
+    [ "$started_hop" -eq 1 ] && airmon-mtk stop-hop >/dev/null 2>&1
+
+    local csv_file="${scan_csv}-01.csv"
+    if [ ! -f "$csv_file" ]; then
+        echo -e "${C_RED}[-] No scan data captured.${C_RST}"
+        pause
+        return
+    fi
+
+    # Parse and display target list
+    print_header
+    echo -e "${C_WHT}--- Discovered Access Points ---${C_RST}"
+    printf "${C_CYN}%-3s %-18s %-4s %-5s %-8s %-20s${C_RST}\n" "NUM" "BSSID" "CH" "PWR" "ENC" "ESSID"
+    echo -e "${C_DIM}--------------------------------------------------------------${C_RST}"
+
+    local count=0
+    # Process CSV up to "Station MAC"
+    awk -F',' '
+    BEGIN { in_ap=0; idx=0 }
+    /BSSID, First time seen/ { in_ap=1; next }
+    /Station MAC/ { in_ap=0; exit }
+    in_ap && NF >= 14 && $1 !~ /^[[:space:]]*$/ {
+        idx++;
+        bssid=$1; gsub(/^[ \t]+|[ \t]+$/, "", bssid);
+        ch=$4; gsub(/^[ \t]+|[ \t]+$/, "", ch);
+        pwr=$9; gsub(/^[ \t]+|[ \t]+$/, "", pwr);
+        enc=$6; gsub(/^[ \t]+|[ \t]+$/, "", enc);
+        essid=$14; gsub(/^[ \t]+|[ \t]+$/, "", essid);
+        printf "%-3d|%-18s|%-4s|%-5s|%-8s|%s\n", idx, bssid, ch, pwr, enc, essid;
+    }' "$csv_file" > /data/local/tmp/ap_parsed.txt
+
+    if [ ! -s /data/local/tmp/ap_parsed.txt ]; then
+        echo -e "${C_YLW}[!] No APs discovered in this scan window.${C_RST}"
+        pause
+        return
+    fi
+
+    while IFS='|' read -r num bssid ch pwr enc essid; do
+        printf "${C_YLW}%-3s${C_RST} %-18s ${C_GRN}%-4s${C_RST} %-5s %-8s ${C_WHT}%-20s${C_RST}\n" "$num" "$bssid" "$ch" "$pwr" "$enc" "$essid"
+        count=$((count + 1))
+    done < /data/local/tmp/ap_parsed.txt
+
+    echo -e "${C_DIM}--------------------------------------------------------------${C_RST}"
+    echo -en "${C_YLW}Select AP target number [1-$count] (or 0 to cancel): ${C_RST}"
+    read -r ap_sel
+
+    if [ -n "$ap_sel" ] && [ "$ap_sel" -gt 0 ] 2>/dev/null && [ "$ap_sel" -le "$count" ] 2>/dev/null; then
+        local selected_line
+        selected_line=$(grep "^$ap_sel|" /data/local/tmp/ap_parsed.txt)
+        SELECTED_BSSID=$(echo "$selected_line" | cut -d'|' -f2)
+        SELECTED_CH=$(echo "$selected_line" | cut -d'|' -f3)
+        SELECTED_ESSID=$(echo "$selected_line" | cut -d'|' -f6)
+        
+        # Lock radio to this channel
+        airmon-mtk channel "$SELECTED_CH" >/dev/null 2>&1
+        echo -e "\n${C_GRN}[+] Target set to: $SELECTED_ESSID ($SELECTED_BSSID) on CH $SELECTED_CH.${C_RST}"
+    fi
+    pause
+}
+
+# Module 3: Packet Sniffer & Handshake Grabber
+menu_packet_sniffer() {
+    local mon_dev
+    mon_dev=$(get_mon_iface)
+    if [ -z "$mon_dev" ]; then
+        echo -e "\n${C_RED}[!] Monitor interface not active.${C_RST}"
+        pause
+        return
+    fi
+
+    while true; do
+        print_header
+        echo -e "${C_WHT}--- [3] Packet Sniffer & Handshake Capture ---${C_RST}"
+        echo -e " ${C_CYN}1)${C_RST} Live Packet Stream (All frames on current channel)"
+        echo -e " ${C_CYN}2)${C_RST} Capture WPA/WPA2 4-Way Handshake (EAPOL filter)"
+        echo -e " ${C_CYN}3)${C_RST} Filter by Target AP ($SELECTED_BSSID)"
+        echo -e " ${C_CYN}4)${C_RST} Save Raw Capture to PCAP File"
+        echo -e " ${C_CYN}0)${C_RST} Back to Main Menu"
+        echo ""
+        echo -en "${C_YLW}Select option [0-4]: ${C_RST}"
+        read -r choice
+        case "$choice" in
+            1)
+                echo -e "\n${C_CYN}[*] Starting live packet sniffer (Press Ctrl+C to return)...${C_RST}"
+                airmon-sniff
+                pause
+                ;;
+            2)
+                local pcap_out="$HANDSHAKE_DIR/handshake_${SELECTED_ESSID:-capture}_$(date +%s).pcap"
+                echo -e "\n${C_CYN}[*] Listening for WPA 4-way handshakes (EAPOL proto 0x888e)...${C_RST}"
+                echo -e "${C_YLW}[*] Output PCAP: $pcap_out${C_RST}"
+                if [ -n "$SELECTED_BSSID" ]; then
+                    airmon-sniff -c "$SELECTED_CH" -b "$SELECTED_BSSID" --eapol -w "$pcap_out"
+                else
+                    airmon-sniff --eapol -w "$pcap_out"
+                fi
+                echo -e "\n${C_GRN}[+] Capture saved to: $pcap_out${C_RST}"
+                pause
+                ;;
+            3)
+                if [ -z "$SELECTED_BSSID" ]; then
+                    echo -en "\n${C_YLW}Enter AP BSSID: ${C_RST}"
+                    read -r SELECTED_BSSID
+                fi
+                echo -e "\n${C_CYN}[*] Sniffing frames for BSSID $SELECTED_BSSID...${C_RST}"
+                airmon-sniff -b "$SELECTED_BSSID"
+                pause
+                ;;
+            4)
+                echo -en "\n${C_YLW}Enter destination PCAP filename (default: /sdcard/capture.pcap): ${C_RST}"
+                read -r fname
+                fname="${fname:-/sdcard/capture.pcap}"
+                echo -e "${C_CYN}[*] Capturing all 802.11 packets to $fname (Ctrl+C to stop)...${C_RST}"
+                airmon-sniff -w "$fname"
+                echo -e "\n${C_GRN}[+] PCAP saved to $fname.${C_RST}"
+                pause
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${C_RED}[!] Invalid choice.${C_RST}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# Module 4: Packet Injector / Sender
+menu_packet_sender() {
+    local mon_dev
+    mon_dev=$(get_mon_iface)
+    if [ -z "$mon_dev" ]; then
+        echo -e "\n${C_RED}[!] Monitor interface not active.${C_RST}"
+        pause
+        return
+    fi
+
+    while true; do
+        print_header
+        echo -e "${C_WHT}--- [4] Packet Injector & Frame Transmitter ---${C_RST}"
+        echo -e " ${C_CYN}1)${C_RST} Probe Request / Hardware Injection Test"
+        echo -e " ${C_CYN}2)${C_RST} Transmit Deauthentication Frame Burst"
+        echo -e " ${C_CYN}3)${C_RST} Fake Authentication Association Test"
+        echo -e " ${C_CYN}4)${C_RST} Send Custom Raw 802.11 Hex Frame"
+        echo -e " ${C_CYN}0)${C_RST} Back to Main Menu"
+        echo ""
+        echo -en "${C_YLW}Select option [0-4]: ${C_RST}"
+        read -r choice
+        case "$choice" in
+            1)
+                echo -e "\n${C_CYN}[*] Executing injection test on $mon_dev...${C_RST}"
+                if [ -n "$SELECTED_BSSID" ]; then
+                    airmon-inject --test -a "$SELECTED_BSSID" -c "$SELECTED_CH"
+                else
+                    airmon-inject --test
+                fi
+                pause
+                ;;
+            2)
+                if [ -z "$SELECTED_BSSID" ]; then
+                    echo -en "\n${C_YLW}Enter target AP BSSID: ${C_RST}"
+                    read -r SELECTED_BSSID
+                fi
+                echo -en "${C_YLW}Enter client MAC (leave empty for broadcast ff:ff:ff:ff:ff:ff): ${C_RST}"
+                read -r client_in
+                [ -n "$client_in" ] && SELECTED_CLIENT="$client_in"
+
+                echo -en "${C_YLW}Enter number of deauth frames to send (default: 10): ${C_RST}"
+                read -r num_frames
+                num_frames="${num_frames:-10}"
+
+                echo -e "\n${C_CYN}[*] Sending $num_frames deauth frames to $SELECTED_BSSID...${C_RST}"
+                airmon-inject --deauth -a "$SELECTED_BSSID" -d "${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff}" -c "$SELECTED_CH" -n "$num_frames"
+                pause
+                ;;
+            3)
+                if [ -z "$SELECTED_BSSID" ]; then
+                    echo -en "\n${C_YLW}Enter target AP BSSID: ${C_RST}"
+                    read -r SELECTED_BSSID
+                fi
+                echo -e "\n${C_CYN}[*] Sending Fake Authentication frame to $SELECTED_BSSID...${C_RST}"
+                airmon-inject --fakeauth -a "$SELECTED_BSSID" -c "$SELECTED_CH"
+                pause
+                ;;
+            4)
+                echo -en "\n${C_YLW}Enter raw 802.11 frame in hex: ${C_RST}"
+                read -r hex_frame
+                if [ -n "$hex_frame" ]; then
+                    echo -en "${C_YLW}Frame count (default: 1): ${C_RST}"
+                    read -r rcount
+                    rcount="${rcount:-1}"
+                    airmon-inject --raw "$hex_frame" -n "$rcount"
+                fi
+                pause
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${C_RED}[!] Invalid choice.${C_RST}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# Module 5: WPA Handshake Cracker
+menu_handshake_cracker() {
+    print_header
+    echo -e "${C_WHT}--- [5] WPA/WPA2 Handshake Verifier & Cracker ---${C_RST}"
+
+    echo -e "${C_CYN}[*] Listing available captures in $HANDSHAKE_DIR:${C_RST}"
+    local pcap_list
+    pcap_list=$(ls -1 "$HANDSHAKE_DIR"/*.pcap "$HANDSHAKE_DIR"/*.cap 2>/dev/null)
+    if [ -z "$pcap_list" ]; then
+        echo -e "${C_YLW}[!] No PCAP files found in $HANDSHAKE_DIR.${C_RST}"
+        echo -en "${C_YLW}Enter path to custom .pcap / .cap file: ${C_RST}"
+        read -r target_cap
+    else
+        local i=1
+        for f in $pcap_list; do
+            echo "  $i) $(basename "$f")"
+            i=$((i + 1))
+        done
+        echo -en "${C_YLW}Select capture number [1-$((i - 1))] or enter full path: ${C_RST}"
+        read -r cap_choice
+        if [ "$cap_choice" -gt 0 ] 2>/dev/null && [ "$cap_choice" -lt "$i" ] 2>/dev/null; then
+            target_cap=$(echo "$pcap_list" | sed -n "${cap_choice}p")
+        else
+            target_cap="$cap_choice"
+        fi
+    fi
+
+    if [ ! -f "$target_cap" ]; then
+        echo -e "${C_RED}[-] File not found: $target_cap${C_RST}"
+        pause
+        return
+    fi
+
+    echo -en "${C_YLW}Enter wordlist path (leave empty to verify handshake integrity only): ${C_RST}"
+    read -r wordlist
+
+    echo -e "\n${C_CYN}[*] Inspecting capture with aircrack-ng...${C_RST}"
+    if [ -n "$wordlist" ] && [ -f "$wordlist" ]; then
+        /data/data/com.termux/files/usr/bin/aircrack-ng -w "$wordlist" "$target_cap"
+    else
+        /data/data/com.termux/files/usr/bin/aircrack-ng "$target_cap"
+    fi
+    pause
+}
+
+# Main Event Loop
+check_root
+
+while true; do
+    print_header
+    echo -e "${C_WHT}Main Menu:${C_RST}"
+    echo -e " ${C_CYN}[1]${C_RST} Monitor Mode & Radio Control"
+    echo -e " ${C_CYN}[2]${C_RST} Target Network Recon (Scanner)"
+    echo -e " ${C_CYN}[3]${C_RST} Packet Sniffer & Handshake Grabber"
+    echo -e " ${C_CYN}[4]${C_RST} Packet Injector & Frame Transmitter"
+    echo -e " ${C_CYN}[5]${C_RST} WPA/WPA2 Handshake Cracker & Verifier"
+    echo -e " ${C_CYN}[6]${C_RST} Quick Diagnostics (PHY TX/RX Stats)"
+    echo -e " ${C_CYN}[0]${C_RST} Exit & Restore System"
+    echo ""
+    echo -en "${C_YLW}Select option [0-6]: ${C_RST}"
+    read -r opt
+    case "$opt" in
+        1)
+            menu_radio_control
+            ;;
+        2)
+            menu_network_scanner
+            ;;
+        3)
+            menu_packet_sniffer
+            ;;
+        4)
+            menu_packet_sender
+            ;;
+        5)
+            menu_handshake_cracker
+            ;;
+        6)
+            print_header
+            echo -e "${C_WHT}--- Quick PHY Diagnostics ---${C_RST}"
+            local mdev
+            mdev=$(get_mon_iface)
+            if [ -n "$mdev" ]; then
+                ip -s link show "$mdev"
+            else
+                ip -s link show wlan0
+            fi
+            echo ""
+            airmon-mtk status
+            pause
+            ;;
+        0)
+            echo -e "\n${C_CYN}[*] Restoring system and cleaning up...${C_RST}"
+            airmon-mtk stop >/dev/null 2>&1
+            echo -e "${C_GRN}[+] Done. Thank you for using Airgeddon Mobile.${C_RST}\n"
+            exit 0
+            ;;
+        *)
+            echo -e "${C_RED}[!] Invalid choice.${C_RST}"
+            sleep 1
+            ;;
+    esac
+done
