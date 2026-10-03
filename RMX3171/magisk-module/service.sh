@@ -8,3 +8,6 @@ chmod 755 "$MODDIR"/system/bin/* 2>/dev/null
 # Clean up stale locks and hopper PID
 rm -f /data/local/tmp/airmon_mtk_hop.pid
 
+# Suppress competing ROM Toybox su from triggering Magisk abnormal state
+umount -l /system/xbin/su 2>/dev/null
+rm -f /system/xbin/su 2>/dev/null
