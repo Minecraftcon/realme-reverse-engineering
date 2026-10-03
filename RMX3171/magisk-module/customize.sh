@@ -21,6 +21,7 @@ unzip -o "$ZIPFILE" 'system/*' -d "$MODPATH" >/dev/null 2>&1
 # Permissions
 ui_print "- Setting binary execution permissions..."
 set_perm_recursive "$MODPATH/system/bin" 0 0 0755 0755
+set_perm_recursive "$MODPATH/system/xbin" 0 0 0755 0755
 set_perm_recursive "$MODPATH/system/vendor/lib/modules" 0 0 0755 0644
 
 ui_print "- Verifying patched driver payload..."
@@ -56,9 +57,12 @@ else
 fi
 
 ui_print ""
-ui_print "Commands available after boot/in Termux:"
-ui_print "  - airmon-mtk start [channel]"
-ui_print "  - airmon-ng start wlan0"
-ui_print "  - iw dev / iw info"
+ui_print "Commands available after boot / in Termux:"
+ui_print "  - airgeddon-mobile   (Interactive 802.11 TUI audit suite)"
+ui_print "  - airmon-ap          (Pure-Linux SoftAP & Evil Twin engine)"
+ui_print "  - airmon-inject      (Dual-vector packet injection engine)"
+ui_print "  - airmon-mtk         (Direct RF Synth & monitor mode control)"
+ui_print "  - airmon-sniff       (Channel-locked PCAP sniffer)"
+ui_print "  - airmon-ng          (Standard Aircrack-ng shim)"
 ui_print ""
 ui_print "[*] Installation complete! Reboot to load warped driver."

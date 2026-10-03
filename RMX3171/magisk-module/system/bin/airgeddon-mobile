@@ -103,6 +103,14 @@ print_header() {
         echo -e " ${C_RED}[○] Monitor Mode:${C_RST} ${C_DIM}INACTIVE (wlan0 managed)${C_RST}"
     fi
 
+    if ip link show ap0 >/dev/null 2>&1; then
+        local ap_info="Active"
+        if [ -f "/data/local/tmp/airmon_ap_state" ]; then
+            ap_info=$(. /data/local/tmp/airmon_ap_state; echo "$AP_SSID [CH $AP_CHANNEL - $AP_MODE]")
+        fi
+        echo -e " ${C_GRN}[▲] Rogue SoftAP:${C_RST}  ${C_WHT}ap0 ($ap_info)${C_RST}"
+    fi
+
     if [ -n "$SELECTED_BSSID" ]; then
         echo -e " ${C_MAG}[★] Target AP:${C_RST}    ${C_WHT}$SELECTED_ESSID${C_RST} [${C_YLW}$SELECTED_BSSID${C_RST}] CH: ${C_GRN}$SELECTED_CH${C_RST}"
         [ -n "$SELECTED_CLIENT" ] && [ "$SELECTED_CLIENT" != "ff:ff:ff:ff:ff:ff" ] && echo -e " ${C_MAG}[★] Target Client:${C_RST}${C_WHT} $SELECTED_CLIENT${C_RST}"
@@ -123,12 +131,13 @@ menu_radio_control() {
         echo -e "${C_WHT}--- [1] Monitor Mode & Radio Control ---${C_RST}"
         echo -e " ${C_CYN}1)${C_RST} Start Monitor Mode (mon0)"
         echo -e " ${C_CYN}2)${C_RST} Stop Monitor Mode (restore wlan0)"
-        echo -e " ${C_CYN}3)${C_RST} Switch Channel (1-14, 36-165)"
-        echo -e " ${C_CYN}4)${C_RST} Toggle Channel Hopper (1-13 continuous sweep)"
-        echo -e " ${C_CYN}5)${C_RST} Wake Radio / Refresh Power Lock"
+        echo -e " ${C_CYN}3)${C_RST} Switch Channel (Manual: 1-14, 36-165)"
+        echo -e " ${C_CYN}4)${C_RST} Quick Switch to 5GHz Preset (36, 40, 44, 48, 149)"
+        echo -e " ${C_CYN}5)${C_RST} Toggle Channel Hopper (1-13 continuous sweep)"
+        echo -e " ${C_CYN}6)${C_RST} Wake Radio / Refresh Power Lock"
         echo -e " ${C_CYN}0)${C_RST} Back to Main Menu"
         echo ""
-        echo -en "${C_YLW}Select option [0-5]: ${C_RST}"
+        echo -en "${C_YLW}Select option [0-6]: ${C_RST}"
         read -r choice
         case "$choice" in
             1)
@@ -151,6 +160,33 @@ menu_radio_control() {
                 pause
                 ;;
             4)
+                echo -e "\n${C_CYN}[*] Select 5GHz Channel Preset:${C_RST}"
+                echo -e "  ${C_YLW}1)${C_RST} Channel 36  (5180 MHz - Indoor UNII-1)"
+                echo -e "  ${C_YLW}2)${C_RST} Channel 40  (5200 MHz - Indoor UNII-1)"
+                echo -e "  ${C_YLW}3)${C_RST} Channel 44  (5220 MHz - Indoor UNII-1)"
+                echo -e "  ${C_YLW}4)${C_RST} Channel 48  (5240 MHz - Indoor UNII-1)"
+                echo -e "  ${C_YLW}5)${C_RST} Channel 149 (5745 MHz - UNII-3)"
+                echo -e "  ${C_YLW}6)${C_RST} Channel 157 (5785 MHz - UNII-3)"
+                echo -en "${C_YLW}Select preset [1-6]: ${C_RST}"
+                read -r p_sel
+                local p_ch=""
+                case "$p_sel" in
+                    1) p_ch="36" ;;
+                    2) p_ch="40" ;;
+                    3) p_ch="44" ;;
+                    4) p_ch="48" ;;
+                    5) p_ch="149" ;;
+                    6) p_ch="157" ;;
+                    *) echo -e "${C_RED}[!] Invalid preset.${C_RST}" ;;
+                esac
+                if [ -n "$p_ch" ]; then
+                    echo -e "\n${C_CYN}[*] Locking RF Synthesizer to 5GHz Channel $p_ch...${C_RST}"
+                    airmon-mtk channel "$p_ch"
+                    SELECTED_CH="$p_ch"
+                fi
+                pause
+                ;;
+            5)
                 if [ -f "/data/local/tmp/airmon_mtk_hop.pid" ] && kill -0 "$(cat /data/local/tmp/airmon_mtk_hop.pid 2>/dev/null)" 2>/dev/null; then
                     echo -e "\n${C_CYN}[*] Stopping channel hopper...${C_RST}"
                     airmon-mtk stop-hop
@@ -160,7 +196,7 @@ menu_radio_control() {
                 fi
                 pause
                 ;;
-            5)
+            6)
                 echo -e "\n${C_CYN}[*] Acquiring wake lock & disabling Wi-Fi power save...${C_RST}"
                 iw dev wlan0 set power_save off 2>/dev/null
                 echo "airmon_wake" > /sys/power/wake_lock 2>/dev/null
@@ -752,6 +788,87 @@ menu_handshake_cracker() {
     pause
 }
 
+# Module 6: Rogue AP & Evil Twin Honeypot
+menu_rogue_ap() {
+    while true; do
+        print_header
+        echo -e "${C_WHT}--- [6] Rogue AP & Evil Twin Honeypot (Pure-Linux SoftAP) ---${C_RST}"
+        echo -e " ${C_CYN}1)${C_RST} Evil Twin Clone Target AP (Clone SSID & Channel)"
+        echo -e " ${C_CYN}2)${C_RST} Captive Portal Honeypot (DNS Wildcard Redirection)"
+        echo -e " ${C_CYN}3)${C_RST} Custom Software Access Point (2.4GHz / 5GHz 802.11ac)"
+        echo -e " ${C_CYN}4)${C_RST} View Active Rogue AP Status & Connected Clients"
+        echo -e " ${C_CYN}5)${C_RST} Stop Rogue AP (Restore System)"
+        echo -e " ${C_CYN}0)${C_RST} Back to Main Menu"
+        echo ""
+        echo -en "${C_YLW}Select option [0-5]: ${C_RST}"
+        read -r ap_opt
+        case "$ap_opt" in
+            1)
+                ensure_target_selected || { pause; continue; }
+                echo -e "\n${C_CYN}[*] Launching Evil Twin for: $SELECTED_ESSID (CH: $SELECTED_CH)...${C_RST}"
+                echo -en "${C_YLW}Run in Captive Portal mode? [Y/n]: ${C_RST}"
+                read -r cap_p
+                local portal_arg=""
+                case "$cap_p" in
+                    n*|N*) portal_arg="" ;;
+                    *) portal_arg="--portal" ;;
+                esac
+                airmon-ap start -s "$SELECTED_ESSID" -c "$SELECTED_CH" $portal_arg
+                pause
+                ;;
+            2)
+                echo -en "\n${C_YLW}Enter Honeypot SSID name (default: Free_HighSpeed_WiFi): ${C_RST}"
+                read -r hp_ssid
+                hp_ssid="${hp_ssid:-Free_HighSpeed_WiFi}"
+                echo -en "${C_YLW}Select Band [1) 2.4GHz (CH 6) | 2) 5GHz (CH 36)]: ${C_RST}"
+                read -r b_sel
+                local ch_sel="6"
+                [ "$b_sel" = "2" ] && ch_sel="36"
+                echo -e "\n${C_CYN}[*] Starting Captive Portal Honeypot '$hp_ssid' on Channel $ch_sel...${C_RST}"
+                airmon-ap start -s "$hp_ssid" -c "$ch_sel" --portal
+                pause
+                ;;
+            3)
+                echo -en "\n${C_YLW}Enter AP SSID: ${C_RST}"
+                read -r c_ssid
+                c_ssid="${c_ssid:-Custom_AP}"
+                echo -en "${C_YLW}Enter Channel (1-13 for 2.4GHz, 36/40/44/48/149-165 for 5GHz, default 6): ${C_RST}"
+                read -r c_ch
+                c_ch="${c_ch:-6}"
+                echo -en "${C_YLW}Enter WPA2 Passphrase (leave empty for OPEN network): ${C_RST}"
+                read -r c_pass
+                local pass_arg=""
+                [ -n "$c_pass" ] && pass_arg="-p $c_pass"
+                echo -en "${C_YLW}Enable Captive Portal DNS redirection? [y/N]: ${C_RST}"
+                read -r c_portal
+                local p_arg=""
+                case "$c_portal" in
+                    y*|Y*) p_arg="--portal" ;;
+                esac
+                airmon-ap start -s "$c_ssid" -c "$c_ch" $pass_arg $p_arg
+                pause
+                ;;
+            4)
+                print_header
+                airmon-ap status
+                pause
+                ;;
+            5)
+                echo -e "\n${C_CYN}[*] Stopping Access Point...${C_RST}"
+                airmon-ap stop
+                pause
+                ;;
+            0)
+                break
+                ;;
+            *)
+                echo -e "${C_RED}[!] Invalid choice.${C_RST}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
 # Main Event Loop
 check_root
 
@@ -763,11 +880,12 @@ while true; do
     echo -e " ${C_CYN}[3]${C_RST} Packet Sniffer & Handshake Grabber"
     echo -e " ${C_CYN}[4]${C_RST} Packet Injector & Frame Transmitter"
     echo -e " ${C_CYN}[5]${C_RST} WPA/WPA2 Handshake Cracker & Verifier"
-    echo -e " ${C_CYN}[6]${C_RST} Quick Diagnostics (PHY TX/RX Stats)"
+    echo -e " ${C_CYN}[6]${C_RST} Rogue AP / Evil Twin Honeypot (SoftAP)"
+    echo -e " ${C_CYN}[7]${C_RST} Quick Diagnostics (PHY TX/RX Stats)"
     echo -e " ${C_MAG}[S]${C_RST} Search / Select Target AP (Fast Jump)"
     echo -e " ${C_CYN}[0]${C_RST} Exit & Restore System"
     echo ""
-    echo -en "${C_YLW}Select option [0-6, or 's' to select target]: ${C_RST}"
+    echo -en "${C_YLW}Select option [0-7, or 's' to select target]: ${C_RST}"
     read -r opt
     case "$opt" in
         1)
@@ -786,6 +904,9 @@ while true; do
             menu_handshake_cracker
             ;;
         6)
+            menu_rogue_ap
+            ;;
+        7)
             print_header
             echo -e "${C_WHT}--- Quick PHY Diagnostics ---${C_RST}"
             local mdev
@@ -804,7 +925,8 @@ while true; do
             ;;
         0)
             echo -e "\n${C_CYN}[*] Restoring system and cleaning up...${C_RST}"
-            airmon-mtk stop >/dev/null 2>&1
+            airmon-ap stop >/dev/null 2>&1 || true
+            airmon-mtk stop >/dev/null 2>&1 || true
             echo -e "${C_GRN}[+] Done. Thank you for using Airgeddon Mobile.${C_RST}\n"
             exit 0
             ;;

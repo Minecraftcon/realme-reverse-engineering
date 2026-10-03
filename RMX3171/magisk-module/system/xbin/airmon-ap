@@ -1,0 +1,372 @@
+#!/bin/sh
+# airmon-ap: Standalone Pure-Linux Software Access Point Engine
+# Target: MediaTek MT6768 (Helio G85 / RMX3171) & MT6631 Wi-Fi Chipset
+# Utilizes dynamic virtual interface ap0 (role=1) to bypass vendor EFAULT restrictions.
+# Features: Open & WPA2-PSK, 2.4GHz & 5GHz 802.11ac, Captive Portal DNS redirection, DHCP server.
+
+export PATH="/system/bin:/system/xbin:/data/adb/modules/mtk-aircrack-core/system/bin:/vendor/bin:/vendor/bin/hw:$PATH"
+
+CONF_FILE="/data/local/tmp/airmon_hostapd.conf"
+HOSTAPD_PID_FILE="/data/local/tmp/airmon_hostapd.pid"
+DNSMASQ_PID_FILE="/data/local/tmp/airmon_dnsmasq.pid"
+STATE_FILE="/data/local/tmp/airmon_ap_state"
+LEASE_FILE="/data/local/tmp/airmon_ap.leases"
+LOG_FILE="/data/local/tmp/airmon_ap.log"
+
+HOSTAPD_BIN="/vendor/bin/hw/hostapd"
+DNSMASQ_BIN="/system/bin/dnsmasq"
+
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        echo "[-] Error: airmon-ap must be run as root." >&2
+        exit 1
+    fi
+}
+
+check_root
+
+show_help() {
+    cat << 'EOF'
+============================================================
+  MediaTek Pure-Linux Access Point Engine (RMX3171)
+============================================================
+Usage: airmon-ap [command] [options]
+
+Commands:
+  start                     Start software Access Point on ap0
+  stop                      Stop Access Point and restore system
+  status                    Show active AP status and connected clients
+  clients                   Dump detailed connected station telemetry
+
+Options:
+  -s, --ssid <name>         SSID broadcast name (Default: MTK_Field_AP)
+  -c, --channel <num>       Channel (1-13 for 2.4GHz, 36-165 for 5GHz, Default: 6)
+  -p, --passphrase <key>    WPA2-PSK passphrase (min 8 chars. If omitted, AP is OPEN)
+  -b, --band <2.4|5>        Force band (Default: auto-selected by channel)
+  -g, --gateway <ip>        Gateway IP for ap0 (Default: 192.168.4.1)
+  --no-dhcp                 Do not run dnsmasq DHCP server
+  --portal, --captive       Redirect all DNS queries to gateway IP (Captive Portal mode)
+  -h, --help                Display this help message
+
+Examples:
+  airmon-ap start -s Free_WiFi -c 6
+  airmon-ap start -s Secure_5G -c 36 -p hunter22
+  airmon-ap start -s Hotel_Guest -c 1 --portal
+  airmon-ap status
+  airmon-ap stop
+============================================================
+EOF
+}
+
+cleanup_stale() {
+    if [ -f "$HOSTAPD_PID_FILE" ]; then
+        local pid
+        pid=$(cat "$HOSTAPD_PID_FILE" 2>/dev/null)
+        [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+        rm -f "$HOSTAPD_PID_FILE"
+    fi
+    if [ -f "$DNSMASQ_PID_FILE" ]; then
+        local dpid
+        dpid=$(cat "$DNSMASQ_PID_FILE" 2>/dev/null)
+        [ -n "$dpid" ] && kill -9 "$dpid" 2>/dev/null
+        rm -f "$DNSMASQ_PID_FILE"
+    fi
+    killall -9 hostapd 2>/dev/null || true
+    killall -9 dnsmasq 2>/dev/null || true
+}
+
+stop_ap() {
+    echo "[*] Stopping Pure-Linux Access Point..."
+    cleanup_stale
+
+    # Delete virtual AP interface
+    if ip link show ap0 >/dev/null 2>&1; then
+        ip link set ap0 down 2>/dev/null
+        iw dev ap0 del 2>/dev/null || true
+        echo "[+] Deleted virtual interface ap0."
+    fi
+
+    # Clean temporary files
+    rm -f "$CONF_FILE" "$LEASE_FILE" "$STATE_FILE" 2>/dev/null
+
+    # Restore Android network stack if requested
+    if [ -f "/data/local/tmp/airmon_saved_state" ]; then
+        airmon-mtk stop >/dev/null 2>&1 || true
+    else
+        # Direct baseband power cycle to release hardware buffers
+        echo 0 > /dev/wmtWifi 2>/dev/null || true
+        sleep 0.5
+        cmd wifi set-wifi-enabled enabled >/dev/null 2>&1 || true
+    fi
+
+    echo "[+] System restored to normal state."
+}
+
+show_status() {
+    echo "============================================================"
+    echo "  MediaTek Pure-Linux AP Status (ap0)"
+    echo "============================================================"
+    if ! ip link show ap0 >/dev/null 2>&1; then
+        echo "[-] Access Point interface (ap0) is INACTIVE."
+        return 1
+    fi
+
+    if [ -f "$STATE_FILE" ]; then
+        . "$STATE_FILE"
+        echo "[+] State:       ACTIVE"
+        echo "[*] SSID:        $AP_SSID"
+        echo "[*] Channel:     $AP_CHANNEL ($AP_BAND)"
+        echo "[*] Security:    $AP_SEC"
+        echo "[*] Gateway IP:  $AP_GATEWAY"
+        echo "[*] Mode:        $AP_MODE"
+    else
+        echo "[+] State:       RUNNING (manual configuration)"
+    fi
+
+    echo "------------------------------------------------------------"
+    echo "[*] Connected Stations:"
+    local stations
+    stations=$(iw dev ap0 station dump 2>/dev/null)
+    if [ -z "$stations" ]; then
+        echo "  (No client stations currently connected)"
+    else
+        echo "$stations" | awk '/Station/{print "  - MAC: " $2} /signal:/{print "    Signal: " $2 " " $3} /rx bytes:/{print "    RX: " $3 " bytes | TX: " $6 " bytes"}'
+    fi
+
+    if [ -f "$LEASE_FILE" ] && [ -s "$LEASE_FILE" ]; then
+        echo "------------------------------------------------------------"
+        echo "[*] Active DHCP Leases:"
+        while read -r exp mac ip name client_id; do
+            echo "  - $ip  -->  $mac ($name)"
+        done < "$LEASE_FILE"
+    fi
+    echo "============================================================"
+}
+
+start_ap() {
+    local ssid="MTK_Field_AP"
+    local channel="6"
+    local passphrase=""
+    local band="2.4GHz"
+    local gateway="192.168.4.1"
+    local use_dhcp=1
+    local captive_portal=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -s|--ssid) ssid="$2"; shift 2 ;;
+            -c|--channel) channel="$2"; shift 2 ;;
+            -p|--passphrase) passphrase="$2"; shift 2 ;;
+            -b|--band) band="$2"; shift 2 ;;
+            -g|--gateway) gateway="$2"; shift 2 ;;
+            --no-dhcp) use_dhcp=0; shift ;;
+            --portal|--captive) captive_portal=1; shift ;;
+            -h|--help) show_help; exit 0 ;;
+            *) echo "[-] Unknown argument: $1" >&2; show_help; exit 1 ;;
+        esac
+    done
+
+    # Validate channel & band
+    if [ "$channel" -ge 36 ] 2>/dev/null; then
+        band="5GHz"
+    fi
+
+    echo "============================================================"
+    echo "  MediaTek Pure-Linux Access Point Engine (RMX3171)"
+    echo "============================================================"
+    echo "[*] Target SSID:   $ssid"
+    echo "[*] Band / CH:     $band (Channel $channel)"
+    if [ -n "$passphrase" ]; then
+        if [ "${#passphrase}" -lt 8 ]; then
+            echo "[-] Error: Passphrase must be at least 8 characters long." >&2
+            exit 1
+        fi
+        echo "[*] Security:      WPA2-PSK (AES-CCMP)"
+    else
+        echo "[*] Security:      OPEN (No Encryption)"
+    fi
+    echo "[*] Gateway IP:    $gateway"
+    [ "$captive_portal" -eq 1 ] && echo "[*] Captive Mode:  ENABLED (DNS wildcard redirection)"
+    echo "------------------------------------------------------------"
+
+    cleanup_stale
+
+    # 1. Engage pure Linux hardware isolation
+    echo "[*] Engaging pure Linux isolation (disabling Android Wi-Fi HAL)..."
+    cmd wifi set-wifi-enabled disabled >/dev/null 2>&1 || true
+    sleep 0.5
+    killall -9 wpa_supplicant 2>/dev/null || true
+
+    # Direct baseband power-on via MT6631 chardev
+    echo 1 > /dev/wmtWifi 2>/dev/null || true
+    sleep 0.8
+    ip link set wlan0 up 2>/dev/null || true
+    sleep 0.3
+
+    # 2. Create dynamic virtual AP interface ap0 (dev->role = 1)
+    if ip link show ap0 >/dev/null 2>&1; then
+        iw dev ap0 del 2>/dev/null || true
+        sleep 0.2
+    fi
+
+    echo "[*] Spawning virtual interface ap0..."
+    if ! iw dev wlan0 interface add ap0 type __ap 2>/dev/null; then
+        # Fallback to type ap
+        iw dev wlan0 interface add ap0 type ap 2>/dev/null || true
+    fi
+
+    if ! ip link show ap0 >/dev/null 2>&1; then
+        echo "[-] Error: Failed to create virtual AP interface ap0." >&2
+        return 1
+    fi
+    echo "[+] Virtual interface ap0 created successfully."
+
+    # 3. Assign IP address and bring interface UP
+    ip addr flush dev ap0 2>/dev/null || true
+    ip addr add "$gateway/24" broadcast "${gateway%.*}.255" dev ap0
+    ip link set ap0 up
+    sleep 0.3
+
+    # Disable power save & lock wake lock
+    iw dev ap0 set power_save off 2>/dev/null || true
+    echo "airmon_ap_wake" > /sys/power/wake_lock 2>/dev/null || true
+
+    # 4. Generate hostapd configuration
+    cat << EOF > "$CONF_FILE"
+interface=ap0
+driver=nl80211
+ssid=$ssid
+channel=$channel
+wmm_enabled=1
+ieee80211n=1
+EOF
+
+    if [ "$band" = "5GHz" ]; then
+        cat << EOF >> "$CONF_FILE"
+hw_mode=a
+ieee80211ac=1
+EOF
+    else
+        cat << EOF >> "$CONF_FILE"
+hw_mode=g
+EOF
+    fi
+
+    if [ -n "$passphrase" ]; then
+        cat << EOF >> "$CONF_FILE"
+wpa=2
+wpa_passphrase=$passphrase
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+EOF
+    else
+        cat << EOF >> "$CONF_FILE"
+auth_algs=1
+wpa=0
+EOF
+    fi
+
+    # 5. Launch hostapd daemon
+    echo "[*] Starting vendor hostapd on ap0..."
+    chmod 644 "$CONF_FILE" 2>/dev/null || true
+    rm -f "$HOSTAPD_PID_FILE" 2>/dev/null
+    touch "$HOSTAPD_PID_FILE" 2>/dev/null
+    chmod 666 "$HOSTAPD_PID_FILE" 2>/dev/null
+
+    "$HOSTAPD_BIN" -B -P "$HOSTAPD_PID_FILE" "$CONF_FILE" >/dev/null 2>&1
+    sleep 1.2
+
+    local hpid=""
+    if [ -f "$HOSTAPD_PID_FILE" ] && [ -s "$HOSTAPD_PID_FILE" ]; then
+        hpid=$(cat "$HOSTAPD_PID_FILE" 2>/dev/null)
+    fi
+    if [ -z "$hpid" ] || ! kill -0 "$hpid" 2>/dev/null; then
+        hpid=$(pidof hostapd 2>/dev/null)
+    fi
+
+    if [ -z "$hpid" ] || ! kill -0 "$hpid" 2>/dev/null; then
+        echo "[-] Error: hostapd failed to start." >&2
+        return 1
+    fi
+    echo "$hpid" > "$HOSTAPD_PID_FILE"
+    echo "[+] hostapd active (PID $hpid)."
+
+    # 6. Start DHCP server (dnsmasq) if requested
+    if [ "$use_dhcp" -eq 1 ] && [ -x "$DNSMASQ_BIN" ]; then
+        local net_prefix="${gateway%.*}"
+        local dhcp_start="${net_prefix}.10"
+        local dhcp_end="${net_prefix}.100"
+
+        local portal_flag=""
+        [ "$captive_portal" -eq 1 ] && portal_flag="--address=/#/$gateway"
+
+        echo "[*] Spawning dnsmasq DHCP server ($dhcp_start - $dhcp_end)..."
+        "$DNSMASQ_BIN" \
+            --no-daemon \
+            --interface=ap0 \
+            --bind-interfaces \
+            --except-interface=lo \
+            --dhcp-range="$dhcp_start,$dhcp_end,255.255.255.0,1h" \
+            --dhcp-option=3,"$gateway" \
+            --dhcp-option=6,"$gateway" \
+            --dhcp-leasefile="$LEASE_FILE" \
+            $portal_flag >/dev/null 2>&1 &
+
+        echo $! > "$DNSMASQ_PID_FILE"
+        echo "[+] DHCP server active (PID $(cat "$DNSMASQ_PID_FILE" 2>/dev/null))."
+    fi
+
+    # Save state
+    local sec_type="OPEN"
+    [ -n "$passphrase" ] && sec_type="WPA2-PSK"
+    local cap_mode="Standard AP"
+    [ "$captive_portal" -eq 1 ] && cap_mode="Captive Portal"
+
+    cat << EOF > "$STATE_FILE"
+AP_SSID="$ssid"
+AP_CHANNEL="$channel"
+AP_BAND="$band"
+AP_SEC="$sec_type"
+AP_GATEWAY="$gateway"
+AP_MODE="$cap_mode"
+EOF
+
+    echo "------------------------------------------------------------"
+    echo -e "\033[1;32m[✓] Access Point is LIVE and broadcasting beacons!\033[0m"
+    echo "[*] SSID:     $ssid"
+    echo "[*] Channel:  $channel ($band)"
+    echo "[*] Gateway:  $gateway"
+    echo "[*] Run 'airmon-ap status' or 'airmon-ap stop' anytime."
+    echo "============================================================"
+}
+
+# Main Command Dispatch
+case "$1" in
+    start)
+        shift
+        start_ap "$@"
+        ;;
+    stop)
+        stop_ap
+        ;;
+    status)
+        show_status
+        ;;
+    clients)
+        echo "[*] Connected Stations (ap0):"
+        iw dev ap0 station dump 2>/dev/null || echo "[-] ap0 is not active."
+        ;;
+    -h|--help|help)
+        show_help
+        exit 0
+        ;;
+    *)
+        if [ $# -eq 0 ]; then
+            show_help
+        else
+            echo "[-] Unknown command: $1" >&2
+            show_help
+            exit 1
+        fi
+        ;;
+esac

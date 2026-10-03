@@ -3,4 +3,4 @@ name=MTK Aircrack Core
 version=v1.3.0-alpha
 versionCode=130
 author=Shado & Antigravity
-description=Desktop-grade native monitor mode (mon0), raw 802.11 packet injection engine, and wireless penetration testing shims for MediaTek Helio G85 (wlan_drv_gen4m).
+description=Desktop-grade native monitor mode (mon0), bidirectional raw packet injection (airmon-inject), pure-Linux Software AP & Evil Twin honeypot (airmon-ap), and 802.11 TUI suite (airgeddon-mobile) for MediaTek Helio G85 MT6768.
