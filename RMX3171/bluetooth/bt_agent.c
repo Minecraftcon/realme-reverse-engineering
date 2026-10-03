@@ -227,6 +227,22 @@ int main(int argc, char **argv) {
                     memcpy(&neg_reply[4], bd, 6);
                     write(fd, neg_reply, sizeof(neg_reply));
                 }
+                else if (evt_code == 0x31 && n >= 9) {
+                    // HCI_IO_Capability_Request: Reply with NoInputNoOutput to force Just-Works SSP
+                    uint8_t *bd = &rx[3];
+                    printf("  \033[1;36m[SSP]\033[0m IO Capabilities Requested by %02X:%02X:%02X:%02X:%02X:%02X -> Replying NoInputNoOutput (Just-Works)...\n",
+                           bd[5], bd[4], bd[3], bd[2], bd[1], bd[0]);
+                    uint8_t io_reply[13] = {0};
+                    io_reply[0] = 0x01;
+                    io_reply[1] = 0x2B; // OpCode 0x042B (HCI_IO_Capability_Request_Reply)
+                    io_reply[2] = 0x04;
+                    io_reply[3] = 0x09; // Len = 9
+                    memcpy(&io_reply[4], bd, 6);
+                    io_reply[10] = 0x03; // IO_Capability: NoInputNoOutput (0x03)
+                    io_reply[11] = 0x00; // OOB_Data_Present: None
+                    io_reply[12] = 0x01; // Authentication_Requirements: MITM Not Required, General Bonding
+                    write(fd, io_reply, sizeof(io_reply));
+                }
                 else if (evt_code == 0x33 && n >= 13) {
                     // HCI_User_Confirmation_Request: Auto-Confirm SSP (Numeric Comparison / Just Works)
                     uint8_t *bd = &rx[3];
@@ -240,6 +256,17 @@ int main(int argc, char **argv) {
                     conf_reply[3] = 0x06;
                     memcpy(&conf_reply[4], bd, 6);
                     write(fd, conf_reply, sizeof(conf_reply));
+                }
+                else if (evt_code == 0x36 && n >= 10) {
+                    // HCI_Simple_Pairing_Complete
+                    uint8_t status = rx[3];
+                    uint8_t *bd = &rx[4];
+                    if (status == 0x00) {
+                        printf("\033[1;32m[SSP SUCCESS]\033[0m Simple Secure Pairing with %02X:%02X:%02X:%02X:%02X:%02X COMPLETED!\033[0m\n",
+                               bd[5], bd[4], bd[3], bd[2], bd[1], bd[0]);
+                    } else {
+                        printf("\033[1;31m[SSP FAILED]\033[0m Simple Secure Pairing failed (Status: 0x%02X)\033[0m\n", status);
+                    }
                 }
                 else if (evt_code == 0x18 && n >= 26) {
                     // HCI_Link_Key_Notification: Intercepted Link Key!
@@ -256,6 +283,75 @@ int main(int argc, char **argv) {
                     uint16_t handle = rx[4] | (rx[5] << 8);
                     uint8_t reason = rx[6];
                     printf("\033[1;31m[DISCONNECT]\033[0m Handle 0x%04X disconnected (Reason: 0x%02X)\n", handle, reason);
+                }
+            } else if (n >= 9 && rx[0] == 0x02) { // HCI ACL Data Packet
+                uint16_t handle = rx[1] | ((rx[2] & 0x0F) << 8);
+                uint16_t l2cap_cid = rx[7] | (rx[8] << 8);
+
+                if (l2cap_cid == 0x0001 && n >= 11) { // L2CAP Signaling Channel
+                    uint8_t cmd_code = rx[9];
+                    uint8_t ident = rx[10];
+
+                    if (cmd_code == 0x02 && n >= 17) { // L2CAP_CONNECTION_REQ
+                        uint16_t psm = rx[13] | (rx[14] << 8);
+                        uint16_t scid = rx[15] | (rx[16] << 8);
+                        printf("\033[1;34m[L2CAP CONNECT]\033[0m PSM: 0x%04X (%s) from SCID 0x%04X -> Accepting...\n",
+                               psm, psm==1?"SDP":psm==3?"RFCOMM":psm==23?"AVDTP":"Service", scid);
+
+                        uint8_t conn_rsp[] = {
+                            0x02,
+                            (uint8_t)(handle & 0xFF),
+                            (uint8_t)((handle >> 8) & 0x0F),
+                            0x0C, 0x00, // Total ACL Length = 12
+                            0x08, 0x00, // L2CAP Length = 8
+                            0x01, 0x00, // L2CAP CID = 0x0001
+                            0x03,       // Code: L2CAP_CONNECTION_RSP
+                            ident,      // Ident
+                            0x04, 0x00, // Payload Length = 4
+                            (uint8_t)(scid & 0xFF), (uint8_t)((scid >> 8) & 0xFF), // DCID
+                            (uint8_t)(scid & 0xFF), (uint8_t)((scid >> 8) & 0xFF), // SCID
+                            0x00, 0x00, // Result: Success (0x0000)
+                            0x00, 0x00  // Status: No further info
+                        };
+                        write(fd, conn_rsp, sizeof(conn_rsp));
+                        printf("  \033[1;32m[✓]\033[0m L2CAP Channel 0x%04X Established!\n", scid);
+                    }
+                    else if (cmd_code == 0x04 && n >= 15) { // L2CAP_CONFIGURATION_REQ
+                        uint16_t dcid = rx[13] | (rx[14] << 8);
+                        uint8_t cfg_rsp[] = {
+                            0x02,
+                            (uint8_t)(handle & 0xFF),
+                            (uint8_t)((handle >> 8) & 0x0F),
+                            0x0A, 0x00, // Total ACL Length = 10
+                            0x06, 0x00, // L2CAP Length = 6
+                            0x01, 0x00, // L2CAP CID = 0x0001
+                            0x05,       // Code: L2CAP_CONFIGURATION_RSP
+                            ident,      // Ident
+                            0x02, 0x00, // Payload Length = 2
+                            (uint8_t)(dcid & 0xFF), (uint8_t)((dcid >> 8) & 0xFF),
+                            0x00, 0x00, // Flags = 0
+                            0x00, 0x00  // Result: Success
+                        };
+                        write(fd, cfg_rsp, sizeof(cfg_rsp));
+                    }
+                    else if (cmd_code == 0x0A && n >= 15) { // L2CAP_INFORMATION_REQ
+                        uint16_t info_type = rx[13] | (rx[14] << 8);
+                        uint8_t info_rsp[] = {
+                            0x02,
+                            (uint8_t)(handle & 0xFF),
+                            (uint8_t)((handle >> 8) & 0x0F),
+                            0x0C, 0x00, // Total ACL Length = 12
+                            0x08, 0x00, // L2CAP Length = 8
+                            0x01, 0x00, // L2CAP CID = 0x0001
+                            0x0B,       // Code: L2CAP_INFORMATION_RSP
+                            ident,      // Ident
+                            0x04, 0x00, // Payload Length = 4
+                            (uint8_t)(info_type & 0xFF), (uint8_t)((info_type >> 8) & 0xFF),
+                            0x00, 0x00, // Result: Success
+                            0x80, 0x02, 0x00, 0x00 // Extended Features Mask
+                        };
+                        write(fd, info_rsp, sizeof(info_rsp));
+                    }
                 }
             }
         }
