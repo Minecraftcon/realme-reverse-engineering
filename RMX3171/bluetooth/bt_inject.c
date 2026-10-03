@@ -364,6 +364,15 @@ int main(int argc, char **argv) {
                         memcpy(&accept_cmd[4], bd, 6);
                         accept_cmd[10] = 0x01; // Slave
                         write(fd, accept_cmd, sizeof(accept_cmd));
+                    } else if (evt == 0x31 && n >= 9) { // IO Capability Request
+                        uint8_t *bd = &rx_buf[3];
+                        printf("  \033[1;36m[SSP]\033[0m IO Capabilities Requested -> Replying Just-Works (NoInputNoOutput)...\n");
+                        uint8_t io_reply[13] = { 0x01, 0x2B, 0x04, 0x09 };
+                        memcpy(&io_reply[4], bd, 6);
+                        io_reply[10] = 0x03; // NoInputNoOutput
+                        io_reply[11] = 0x00; // None
+                        io_reply[12] = 0x01; // Bonding
+                        write(fd, io_reply, sizeof(io_reply));
                     } else if (evt == 0x16 && n >= 9) { // PIN Request
                         uint8_t *bd = &rx_buf[3];
                         uint8_t pin[27] = { 0x01, 0x0D, 0x04, 0x17 };
@@ -383,12 +392,79 @@ int main(int argc, char **argv) {
                         uint8_t conf[10] = { 0x01, 0x2C, 0x04, 0x06 };
                         memcpy(&conf[4], bd, 6);
                         write(fd, conf, sizeof(conf));
+                    } else if (evt == 0x36 && n >= 10) { // Simple Pairing Complete
+                        uint8_t status = rx_buf[3];
+                        uint8_t *bd = &rx_buf[4];
+                        if (status == 0x00) {
+                            printf("\033[1;32m[PAIRING SUCCESS]\033[0m Paired with %02X:%02X:%02X:%02X:%02X:%02X!\033[0m\n",
+                                   bd[5], bd[4], bd[3], bd[2], bd[1], bd[0]);
+                        } else {
+                            printf("\033[1;31m[PAIRING FAILED]\033[0m Status: 0x%02X\033[0m\n", status);
+                        }
                     } else if (evt == 0x05 && n >= 7) { // Disconnection Complete
                         uint16_t handle = rx_buf[4] | (rx_buf[5] << 8);
                         printf("\n\033[1;33m[DISCONNECT]\033[0m Handle 0x%04X disconnected -> Resuming Broadcast...\n", handle);
                         // Re-enable advertising
                         uint8_t cmd_en[] = { 0x01, 0x0a, 0x20, 0x01, 0x01 };
                         write(fd, cmd_en, sizeof(cmd_en));
+                    }
+                } else if (n >= 9 && rx_buf[0] == 0x02) { // HCI ACL Data Packet
+                    uint16_t handle = rx_buf[1] | ((rx_buf[2] & 0x0F) << 8);
+                    uint16_t l2cap_cid = rx_buf[7] | (rx_buf[8] << 8);
+
+                    if (l2cap_cid == 0x0006 && n >= 10) { // SMP (Security Manager Protocol)
+                        uint8_t smp_code = rx_buf[9];
+                        if (smp_code == 0x01) { // Pairing Request
+                            printf("\n\033[1;36m[BLE SMP]\033[0m Pairing Request on Handle 0x%04X -> Replying Just-Works...\n", handle);
+                            uint8_t smp_rsp[] = {
+                                0x02,
+                                (uint8_t)(handle & 0xFF),
+                                (uint8_t)((handle >> 8) & 0x0F),
+                                0x0B, 0x00, // Total Len = 11
+                                0x07, 0x00, // L2CAP Len = 7
+                                0x06, 0x00, // CID = 0x0006 (SMP)
+                                0x02,       // SMP Pairing Response
+                                0x03,       // IO: NoInputNoOutput (Just Works)
+                                0x00,       // OOB: None
+                                0x01,       // AuthReq: Bonding, No MITM
+                                0x10,       // Key Size: 16
+                                0x00, 0x00  // Key Dist: None
+                            };
+                            write(fd, smp_rsp, sizeof(smp_rsp));
+                            printf("  \033[1;32m[✓]\033[0m BLE SMP Pairing Accepted (Just-Works)!\n");
+                        }
+                    } else if (l2cap_cid == 0x0004 && n >= 10) { // ATT (Attribute Protocol)
+                        uint8_t att_opcode = rx_buf[9];
+                        if (att_opcode == 0x02 && n >= 12) { // ATT_EXCHANGE_MTU_REQ
+                            uint16_t client_mtu = rx_buf[10] | (rx_buf[11] << 8);
+                            printf("\n\033[1;34m[BLE ATT]\033[0m MTU Exchange Request (MTU: %u) -> Replying 517...\n", client_mtu);
+                            uint8_t mtu_rsp[] = {
+                                0x02,
+                                (uint8_t)(handle & 0xFF),
+                                (uint8_t)((handle >> 8) & 0x0F),
+                                0x07, 0x00, // Total len = 7
+                                0x03, 0x00, // L2CAP len = 3
+                                0x04, 0x00, // CID = 0x0004 (ATT)
+                                0x03,       // ATT_EXCHANGE_MTU_RSP
+                                0x05, 0x02  // Server MTU = 517
+                            };
+                            write(fd, mtu_rsp, sizeof(mtu_rsp));
+                        } else {
+                            // Reply Attribute Not Found (error code 0x0A)
+                            uint8_t err_rsp[] = {
+                                0x02,
+                                (uint8_t)(handle & 0xFF),
+                                (uint8_t)((handle >> 8) & 0x0F),
+                                0x09, 0x00, // Total len = 9
+                                0x05, 0x00, // L2CAP len = 5
+                                0x04, 0x00, // CID = 0x0004 (ATT)
+                                0x01,       // ATT_ERROR_RSP
+                                att_opcode, // OpCode
+                                (uint8_t)(n >= 12 ? rx_buf[10] : 0x01), (uint8_t)(n >= 12 ? rx_buf[11] : 0x00),
+                                0x0A        // Error: Attribute Not Found
+                            };
+                            write(fd, err_rsp, sizeof(err_rsp));
+                        }
                     }
                 }
             } else {

