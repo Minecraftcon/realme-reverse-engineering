@@ -1,6 +1,6 @@
 id=mtk-aircrack-core
 name=MTK Aircrack Core
-version=v1.4.0-alpha
-versionCode=140
+version=v1.5.0-alpha
+versionCode=150
 author=Shado & Antigravity
-description=Native Wi-Fi monitor mode (mon0), packet injection, Rogue AP (airmon-ap), and pure-Linux Bluetooth 5.0 baseband sniffer (btmon-mtk) & packet injector (bt-inject) for MediaTek Helio G85 MT6768.
+description=Native Wi-Fi monitor mode (mon0), packet injection, Rogue AP (airmon-ap), pure-Linux Bluetooth 5.0 baseband sniffer (btmon-mtk), packet injector (bt-inject), and Bluetooth console (btgeddon) for MediaTek Helio G85 MT6768.
