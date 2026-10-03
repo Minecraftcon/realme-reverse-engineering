@@ -107,10 +107,10 @@ static const uint8_t IBEACON_PAYLOAD_ANDC[] = {
 };
 
 static void print_banner(void) {
-    printf("\033[1;35m==============================================================\033[0m\n");
-    printf("\033[1;37m        BT-INJECT: MediaTek Bluetooth Packet Injector\033[0m\n");
-    printf("\033[1;30m   Pure-Linux Hardware Baseband Injection Engine (/dev/stpbt)\033[0m\n");
-    printf("\033[1;35m==============================================================\033[0m\n");
+    printf("\033[1;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
+    printf("\033[1;37m        BT-INJECT: MTK Packet Injector\033[0m\n");
+    printf("\033[1;30m     Hardware Baseband Engine (/dev/stpbt)\033[0m\n");
+    printf("\033[1;35m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
 }
 
 static void show_help(const char *prog) {
@@ -326,16 +326,75 @@ int main(int argc, char **argv) {
 
         inject_adv_data(fd, payload, plen, rx_buf);
         printf("\033[1;32m[+] Beacon active on RF channels 37, 38, 39!\033[0m\n");
-        printf("[*] Target duration: %d seconds (Press Ctrl+C to stop)\n", duration_sec);
-        printf("[*] Open Bluetooth on your phone and tap 'Pair new device' or refresh!\n\n");
+        printf("\033[1;36m[+] Auto-Accept Connection Engine: ACTIVE\033[0m\n");
+        printf("[*] Target duration: %d seconds (0 = infinite / Press Ctrl+C to stop)\n", duration_sec);
+        printf("[*] Open Bluetooth on your phone and tap to pair!\n\n");
 
         time_t start_time = time(NULL);
         while (g_running) {
             int elapsed = (int)(time(NULL) - start_time);
             if (duration_sec > 0 && elapsed >= duration_sec) break;
-            printf("\r\033[1;36m[TX ON AIR]\033[0m Broadcasting... Elapsed: %d/%ds ", elapsed, duration_sec);
-            fflush(stdout);
-            sleep(1);
+
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(fd, &fds);
+            struct timeval tv = { .tv_sec = 0, .tv_usec = 500000 };
+
+            int ret = select(fd + 1, &fds, NULL, NULL, &tv);
+            if (ret > 0) {
+                ssize_t n = read(fd, rx_buf, sizeof(rx_buf));
+                if (n >= 2 && rx_buf[0] == 0x04) { // HCI Event
+                    uint8_t evt = rx_buf[1];
+                    if (evt == 0x3E && n >= 5) { // LE Meta Event
+                        uint8_t subevt = rx_buf[3];
+                        if (subevt == 0x01 && n >= 15) { // LE Connection Complete
+                            uint8_t status = rx_buf[4];
+                            uint16_t handle = rx_buf[5] | (rx_buf[6] << 8);
+                            uint8_t *bd = &rx_buf[8];
+                            if (status == 0x00) {
+                                printf("\n\033[1;32m[BLE CONNECT ACCEPTED]\033[0m Connected to Peer: \033[1;37m%02X:%02X:%02X:%02X:%02X:%02X\033[0m (Handle: 0x%04X)\n",
+                                       bd[5], bd[4], bd[3], bd[2], bd[1], bd[0], handle);
+                            }
+                        }
+                    } else if (evt == 0x04 && n >= 12) { // Classic Connection Request
+                        uint8_t *bd = &rx_buf[3];
+                        printf("\n\033[1;35m[PAIR REQUEST]\033[0m Incoming from \033[1;37m%02X:%02X:%02X:%02X:%02X:%02X\033[0m -> Auto-Accepting...\n",
+                               bd[5], bd[4], bd[3], bd[2], bd[1], bd[0]);
+                        uint8_t accept_cmd[11] = { 0x01, 0x09, 0x04, 0x07 };
+                        memcpy(&accept_cmd[4], bd, 6);
+                        accept_cmd[10] = 0x01; // Slave
+                        write(fd, accept_cmd, sizeof(accept_cmd));
+                    } else if (evt == 0x16 && n >= 9) { // PIN Request
+                        uint8_t *bd = &rx_buf[3];
+                        uint8_t pin[27] = { 0x01, 0x0D, 0x04, 0x17 };
+                        memcpy(&pin[4], bd, 6);
+                        pin[10] = 4;
+                        memcpy(&pin[11], "0000", 4);
+                        write(fd, pin, sizeof(pin));
+                    } else if (evt == 0x17 && n >= 9) { // Link Key Request
+                        uint8_t *bd = &rx_buf[3];
+                        uint8_t neg[10] = { 0x01, 0x0C, 0x04, 0x06 };
+                        memcpy(&neg[4], bd, 6);
+                        write(fd, neg, sizeof(neg));
+                    } else if (evt == 0x33 && n >= 13) { // User Confirmation (SSP)
+                        uint8_t *bd = &rx_buf[3];
+                        printf("  \033[1;32m[✓]\033[0m Auto-Confirming SSP Pairing for %02X:%02X:%02X:%02X:%02X:%02X...\n",
+                               bd[5], bd[4], bd[3], bd[2], bd[1], bd[0]);
+                        uint8_t conf[10] = { 0x01, 0x2C, 0x04, 0x06 };
+                        memcpy(&conf[4], bd, 6);
+                        write(fd, conf, sizeof(conf));
+                    } else if (evt == 0x05 && n >= 7) { // Disconnection Complete
+                        uint16_t handle = rx_buf[4] | (rx_buf[5] << 8);
+                        printf("\n\033[1;33m[DISCONNECT]\033[0m Handle 0x%04X disconnected -> Resuming Broadcast...\n", handle);
+                        // Re-enable advertising
+                        uint8_t cmd_en[] = { 0x01, 0x0a, 0x20, 0x01, 0x01 };
+                        write(fd, cmd_en, sizeof(cmd_en));
+                    }
+                }
+            } else {
+                printf("\r\033[1;36m[TX ON AIR]\033[0m Broadcasting & Listening... Elapsed: %d/%ds ", elapsed, duration_sec);
+                fflush(stdout);
+            }
         }
         printf("\n\n\033[1;32m[✓] Broadcast finished.\033[0m\n");
     }

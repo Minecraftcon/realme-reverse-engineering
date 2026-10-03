@@ -162,12 +162,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("\033[1;32m==============================================================\033[0m\n");
-    printf("\033[1;37m        BTMON-MTK: MediaTek Bluetooth Packet Sniffer\033[0m\n");
-    printf("\033[1;30m   Pure-Linux Direct Baseband Capture (Wireshark PCAP-Ready)\033[0m\n");
-    printf("\033[1;32m==============================================================\033[0m\n");
-    printf("[*] Output PCAP File: %s\n", pcap_file);
-    printf("[*] Capture Mode:     %s\n", scan_mode == 1 ? "BLE Only" : scan_mode == 2 ? "Classic Only" : "Hybrid BLE + Classic");
+    printf("\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
+    printf("\033[1;37m        BTMON-MTK: Baseband Packet Sniffer\033[0m\n");
+    printf("\033[1;30m      Direct HCI Capture (Wireshark PCAP-Ready)\033[0m\n");
+    printf("\033[1;32m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
+    printf("[*] PCAP Output:  %s\n", pcap_file);
+    printf("[*] Scan Mode:    %s\n", scan_mode == 1 ? "BLE Only" : scan_mode == 2 ? "Classic Only" : "Hybrid BLE + Classic");
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);

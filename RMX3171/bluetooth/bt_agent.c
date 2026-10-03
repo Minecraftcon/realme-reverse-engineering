@@ -73,10 +73,10 @@ static void set_ssp_mode(int fd, uint8_t enable) {
 }
 
 static void print_banner(void) {
-    printf("\033[1;36m==============================================================\033[0m\n");
-    printf("\033[1;37m       BT-AGENT: MediaTek Bluetooth Profile & Pairing Faker\033[0m\n");
-    printf("\033[1;30m   Pure-Linux Hardware Baseband Identity & Handshake Daemon\033[0m\n");
-    printf("\033[1;36m==============================================================\033[0m\n");
+    printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
+    printf("\033[1;37m        BT-AGENT: MTK Profile & Pairing Faker\033[0m\n");
+    printf("\033[1;30m      Hardware Baseband Identity & Handshake\033[0m\n");
+    printf("\033[1;36m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m\n");
 }
 
 int main(int argc, char **argv) {
