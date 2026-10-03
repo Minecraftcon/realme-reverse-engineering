@@ -29,3 +29,24 @@ for target in $SU_TARGETS; do
         esac
     fi
 done
+
+# Ensure all module binaries are available in /system/xbin (handles tmpfs /system/xbin ROMs)
+mount -o remount,rw /system/xbin 2>/dev/null
+for bin in "$MODDIR"/system/bin/*; do
+    [ -f "$bin" ] || continue
+    bname=$(basename "$bin")
+    if [ ! -e "/system/xbin/$bname" ]; then
+        touch "/system/xbin/$bname" 2>/dev/null
+        mount -o bind "$bin" "/system/xbin/$bname" 2>/dev/null
+    fi
+done
+mount -o remount,ro /system/xbin 2>/dev/null
+
+# Automatically symlink all module binaries into Termux environment if installed
+if [ -d /data/data/com.termux/files/usr/bin ]; then
+    for bin in "$MODDIR"/system/bin/*; do
+        [ -f "$bin" ] || continue
+        bname=$(basename "$bin")
+        ln -sf "$bin" "/data/data/com.termux/files/usr/bin/$bname" 2>/dev/null
+    done
+fi
