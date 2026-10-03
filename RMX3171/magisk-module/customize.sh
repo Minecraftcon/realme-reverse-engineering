@@ -30,6 +30,31 @@ else
     abort "[-] Error: Driver module payload missing from zip!"
 fi
 
+# Check for competing / non-Magisk root binaries (Toybox, legacy SuperSU, etc.)
+ui_print "- Scanning for competing root binaries across ROM partitions..."
+SU_CONFLICTS="/system/xbin/su /vendor/bin/su /vendor/xbin/su /product/bin/su /system_ext/bin/su /system/bin/failsafe/su /data/local/xbin/su /data/local/bin/su"
+found_conflict=0
+for bad_su in $SU_CONFLICTS; do
+    if [ -e "$bad_su" ]; then
+        ver=$("$bad_su" -v 2>&1)
+        case "$ver" in
+            *MAGISK*|*magisk*)
+                ;;
+            *)
+                ui_print "[!] Detected competing su binary: $bad_su"
+                ui_print "    Reported version: $ver"
+                found_conflict=1
+                ;;
+        esac
+    fi
+done
+
+if [ "$found_conflict" -eq 1 ]; then
+    ui_print "[*] Auto-neutralization configured: service.sh will suppress conflicting su at boot."
+else
+    ui_print "[+] Clean root environment: zero competing su binaries detected."
+fi
+
 ui_print ""
 ui_print "Commands available after boot/in Termux:"
 ui_print "  - airmon-mtk start [channel]"
