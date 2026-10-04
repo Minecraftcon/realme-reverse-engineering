@@ -7,3 +7,7 @@ RMX3171/dumped-drivers/
 # Python cache
 __pycache__/
 *.pyc
+
+# PlatformIO build artifacts
+.pio/
+**/.pio/

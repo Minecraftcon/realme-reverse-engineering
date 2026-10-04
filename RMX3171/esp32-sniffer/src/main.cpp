@@ -25,6 +25,43 @@
 #include <esp_wifi.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdarg.h>
+
+// ─── FreeRTOS Thread-Safe Serial Wrappers ────────────────────────────────────
+// Prevents UART ringbuffer corruption & circular repeating output between
+// Core 0 (Wi-Fi promiscuous RX callback) and Core 1 (Arduino loop/command task)
+static SemaphoreHandle_t serial_mutex = NULL;
+
+static void safe_serial_print(const char *msg) {
+    if (!serial_mutex) {
+        Serial.print(msg);
+        return;
+    }
+    if (xSemaphoreTake(serial_mutex, pdMS_TO_TICKS(15)) == pdTRUE) {
+        Serial.print(msg);
+        xSemaphoreGive(serial_mutex);
+    }
+}
+
+static void safe_serial_println(const char *msg = "") {
+    if (!serial_mutex) {
+        Serial.println(msg);
+        return;
+    }
+    if (xSemaphoreTake(serial_mutex, pdMS_TO_TICKS(15)) == pdTRUE) {
+        Serial.println(msg);
+        xSemaphoreGive(serial_mutex);
+    }
+}
+
+static void safe_serial_printf(const char *fmt, ...) {
+    char buf[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    safe_serial_print(buf);
+}
 
 // ─── State ───────────────────────────────────────────────────────────────────
 static uint8_t  current_channel  = 6;
@@ -99,10 +136,28 @@ static const char *filter_name() {
     }
 }
 
-// ─── Sniffer Callback ─────────────────────────────────────────────────────────
-// Forward declaration
-void populate_ssid_table(const uint8_t *p, int len, const uint8_t *bssid);
+// Beacon SSID -> BSSID lookup table (simple ring, last 16 beacons seen)
+struct ssid_entry { char ssid[33]; uint8_t bssid[6]; };
+static ssid_entry ssid_table[16];
+static uint8_t ssid_table_idx = 0;
 
+// Populate SSID->BSSID lookup table from beacons (called from sniffer_callback)
+void populate_ssid_table(const uint8_t *p, int len, const uint8_t *bssid) {
+    if (len >= 38 && p[36] == 0x00) {
+        uint8_t ssid_len = p[37];
+        if (ssid_len > 32) ssid_len = 32;
+        if (ssid_len > 0 && len >= (int)(38 + ssid_len)) {
+            uint8_t idx = ssid_table_idx % 16;
+            memset(ssid_table[idx].ssid, 0, 33);
+            memcpy(ssid_table[idx].ssid, &p[38], ssid_len);
+            ssid_table[idx].ssid[ssid_len] = '\0';
+            memcpy(ssid_table[idx].bssid, bssid, 6);
+            ssid_table_idx++;
+        }
+    }
+}
+
+// ─── Sniffer Callback ─────────────────────────────────────────────────────────
 void sniffer_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (!sniffing) return;
 
@@ -116,7 +171,6 @@ void sniffer_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
     pkt_total++;
 
     uint8_t fc0        = p[0];
-    uint8_t fc1        = p[1];
     uint8_t frame_type = (fc0 >> 2) & 0x03;  // 0=mgmt 1=ctrl 2=data
     uint8_t subtype    = (fc0 >> 4) & 0x0F;
 
@@ -169,155 +223,154 @@ void sniffer_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
     if (!show) return;
 
+    // Critical frames (deauth, disassoc, eapol) are never dropped.
+    // Routine frames are throttled if UART TX FIFO is congested to avoid blocking wifi_task
+    // and prevent UART buffer circular wrap-around / dropped input.
+    bool is_critical = (is_deauth || is_disassoc || is_eapol);
+    if (!is_critical && Serial.availableForWrite() < 48) {
+        return;
+    }
+
     // ─── Print frame ────────────────────────────────────────────────────────
     if (is_deauth) {
         uint16_t reason = (len >= 26) ? (p[24] | (p[25] << 8)) : 0;
-        Serial.printf("!!! [DEAUTH #%u] CH:%d RSSI:%ddBm | SA=%s -> DA=%s | BSSID=%s | Reason=%u\n",
+        safe_serial_printf("!!! [DEAUTH #%u] CH:%d RSSI:%ddBm | SA=%s -> DA=%s | BSSID=%s | Reason=%u\n",
             pkt_deauth, ch, rssi, sa_s, da_s, bs_s, reason);
     } else if (is_disassoc) {
         uint16_t reason = (len >= 26) ? (p[24] | (p[25] << 8)) : 0;
-        Serial.printf("!!! [DISASSOC #%u] CH:%d RSSI:%ddBm | SA=%s -> DA=%s | BSSID=%s | Reason=%u\n",
+        safe_serial_printf("!!! [DISASSOC #%u] CH:%d RSSI:%ddBm | SA=%s -> DA=%s | BSSID=%s | Reason=%u\n",
             pkt_disassoc, ch, rssi, sa_s, da_s, bs_s, reason);
     } else if (is_beacon) {
         // Parse SSID from beacon (tag 0 at fixed offset 36)
         char ssid[33] = {0};
         if (len >= 38 && p[36] == 0x00) {
             uint8_t ssid_len = p[37];
-            if (ssid_len > 0 && ssid_len <= 32 && len >= (int)(38 + ssid_len)) {
+            if (ssid_len > 32) ssid_len = 32;
+            if (ssid_len > 0 && len >= (int)(38 + ssid_len)) {
                 memcpy(ssid, &p[38], ssid_len);
+                ssid[ssid_len] = '\0';
             }
         }
-        Serial.printf("    [BEACON] CH:%d RSSI:%ddBm | BSSID=%s | SSID=\"%s\"\n",
+        safe_serial_printf("    [BEACON] CH:%d RSSI:%ddBm | BSSID=%s | SSID=\"%s\"\n",
             ch, rssi, bs_s, ssid);
     } else if (is_probe_req) {
         char ssid[33] = {0};
         if (len >= 26 && p[24] == 0x00) {
             uint8_t ssid_len = p[25];
-            if (ssid_len > 0 && ssid_len <= 32 && len >= (int)(26 + ssid_len))
+            if (ssid_len > 32) ssid_len = 32;
+            if (ssid_len > 0 && len >= (int)(26 + ssid_len)) {
                 memcpy(ssid, &p[26], ssid_len);
+                ssid[ssid_len] = '\0';
+            }
         }
-        Serial.printf("    [PROBE-REQ] CH:%d RSSI:%ddBm | SA=%s | SSID=\"%s\"\n",
+        safe_serial_printf("    [PROBE-REQ] CH:%d RSSI:%ddBm | SA=%s | SSID=\"%s\"\n",
             ch, rssi, sa_s, ssid);
     } else if (is_probe_resp) {
-        Serial.printf("    [PROBE-RESP] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n",
+        safe_serial_printf("    [PROBE-RESP] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n",
             ch, rssi, sa_s, da_s);
     } else if (is_eapol) {
-        pkt_eapol++;
-        Serial.printf("*** [EAPOL/HANDSHAKE] CH:%d RSSI:%ddBm | SA=%s -> DA=%s | BSSID=%s — WPA HANDSHAKE!\n",
+        safe_serial_printf("*** [EAPOL/HANDSHAKE] CH:%d RSSI:%ddBm | SA=%s -> DA=%s | BSSID=%s — WPA HANDSHAKE!\n",
             ch, rssi, sa_s, da_s, bs_s);
     } else if (is_auth) {
-        Serial.printf("    [AUTH] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n", ch, rssi, sa_s, da_s);
+        safe_serial_printf("    [AUTH] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n", ch, rssi, sa_s, da_s);
     } else if (is_assoc) {
-        Serial.printf("    [ASSOC] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n", ch, rssi, sa_s, da_s);
+        safe_serial_printf("    [ASSOC] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n", ch, rssi, sa_s, da_s);
     } else if (frame_type == 2) {
-        Serial.printf("    [DATA] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n", ch, rssi, sa_s, da_s);
+        safe_serial_printf("    [DATA] CH:%d RSSI:%ddBm | SA=%s -> DA=%s\n", ch, rssi, sa_s, da_s);
     } else if (frame_type == 1) {
-        Serial.printf("    [CTRL] CH:%d RSSI:%ddBm | Sub=%u\n", ch, rssi, subtype);
+        safe_serial_printf("    [CTRL] CH:%d RSSI:%ddBm | Sub=%u\n", ch, rssi, subtype);
     } else {
-        Serial.printf("    [MGMT] CH:%d RSSI:%ddBm | Sub=%u | SA=%s\n", ch, rssi, subtype, sa_s);
+        safe_serial_printf("    [MGMT] CH:%d RSSI:%ddBm | Sub=%u | SA=%s\n", ch, rssi, subtype, sa_s);
     }
 
-    // Recording: dump raw hex
+    // Recording: dump raw hex in a single atomic string to prevent UART interleaving
     if (recording) {
         pkt_recorded++;
-        Serial.printf("REC[%u] len=%d: ", pkt_recorded, len);
-        for (int i = 0; i < len && i < 64; i++) Serial.printf("%02X ", p[i]);
-        Serial.println();
+        char hex_buf[256];
+        int pos = snprintf(hex_buf, sizeof(hex_buf), "REC[%u] len=%d: ", pkt_recorded, len);
+        for (int i = 0; i < len && i < 64 && pos < (int)sizeof(hex_buf) - 4; i++) {
+            pos += snprintf(hex_buf + pos, sizeof(hex_buf) - pos, "%02X ", p[i]);
+        }
+        if (pos < (int)sizeof(hex_buf) - 1) {
+            hex_buf[pos++] = '\n';
+            hex_buf[pos] = '\0';
+        }
+        safe_serial_print(hex_buf);
     }
 }
 
 // ─── Help Menu ────────────────────────────────────────────────────────────────
 void print_help() {
-    Serial.println();
-    Serial.println("╔══════════════════════════════════════════════════════╗");
-    Serial.println("║      ESP32 802.11 Interactive Sniffer — HELP         ║");
-    Serial.println("╠══════════════════════════════════════════════════════╣");
-    Serial.println("║ CONTROL                                               ║");
-    Serial.println("║  .start          Resume sniffing                      ║");
-    Serial.println("║  .stop           Pause sniffing (stats preserved)     ║");
-    Serial.println("║  .stats          Show packet counters                 ║");
-    Serial.println("║  .reset          Reset all counters to zero           ║");
-    Serial.println("║  .clear          Clear screen                         ║");
-    Serial.println("╠══════════════════════════════════════════════════════╣");
-    Serial.println("║ CHANNEL                                               ║");
-    Serial.println("║  .channel <1-14> Lock to specific channel             ║");
-    Serial.println("║  .hop            Start channel hopping (1-13, fast)  ║");
-    Serial.println("║  .hop stop       Stop hopping                         ║");
-    Serial.println("╠══════════════════════════════════════════════════════╣");
-    Serial.println("║ FILTERING                                             ║");
-    Serial.println("║  .filter all     Show all 802.11 frames               ║");
-    Serial.println("║  .filter mgmt    Only management frames               ║");
-    Serial.println("║  .filter data    Only data frames                     ║");
-    Serial.println("║  .filter ctrl    Only control frames                  ║");
-    Serial.println("║  .filter deauth  Only Deauth frames (attack detector) ║");
-    Serial.println("║  .filter disassoc  Only Disassoc frames               ║");
-    Serial.println("║  .filter probe   Only Probe Req/Resp frames           ║");
-    Serial.println("║  .filter beacon  Only Beacon frames (AP discovery)    ║");
-    Serial.println("║  .filter eapol   Only EAPOL/WPA handshake frames      ║");
-    Serial.println("║  .listen <type>  Alias for .filter                    ║");
-    Serial.println("╠══════════════════════════════════════════════════════╣");
-    Serial.println("║ TARGET LOCKING                                        ║");
-    Serial.println("║  .lock-target <BSSID>    Lock to AP by MAC            ║");
-    Serial.println("║     e.g: .lock-target AA:BB:CC:DD:EE:FF               ║");
-    Serial.println("║  .lock-target <SSID>     Lock to AP by name           ║");
-    Serial.println("║     e.g: .lock-target MyHomeWifi                      ║");
-    Serial.println("║     (requires beacon to be seen first)                ║");
-    Serial.println("║  .unlock         Remove target lock (show all)        ║");
-    Serial.println("╠══════════════════════════════════════════════════════╣");
-    Serial.println("║ RECORDING                                             ║");
-    Serial.println("║  .rec            Start raw hex frame recording        ║");
-    Serial.println("║     Output: REC[n] len=X: <hex bytes>                 ║");
-    Serial.println("║     Copy to host and decode with: text2pcap or        ║");
-    Serial.println("║     pipe to scapy for live analysis                   ║");
-    Serial.println("║  .stoprec        Stop recording                       ║");
-    Serial.println("╠══════════════════════════════════════════════════════╣");
-    Serial.println("║ TIPS                                                  ║");
-    Serial.println("║  - Set .filter deauth + .hop to detect deauth attacks ║");
-    Serial.println("║    across ALL channels in real time                   ║");
-    Serial.println("║  - Set .filter eapol on target channel to catch       ║");
-    Serial.println("║    WPA handshakes while running airmon-inject         ║");
-    Serial.println("║  - .rec + .lock-target dumps raw frames for offline   ║");
-    Serial.println("║    analysis with Wireshark                            ║");
-    Serial.println("║  - EAPOL frames marked *** are WPA 4-way handshakes  ║");
-    Serial.println("║  - Heartbeat prints every 5s with live stats          ║");
-    Serial.println("╚══════════════════════════════════════════════════════╝");
-    Serial.println();
-}
-
-// Beacon SSID -> BSSID lookup table (simple ring, last 16 beacons seen)
-struct ssid_entry { char ssid[33]; uint8_t bssid[6]; };
-static ssid_entry ssid_table[16];
-static uint8_t ssid_table_idx = 0;
-
-// Populate SSID->BSSID lookup table from beacons (called from sniffer_callback)
-void populate_ssid_table(const uint8_t *p, int len, const uint8_t *bssid) {
-    if (len >= 38 && p[36] == 0x00) {
-        uint8_t ssid_len = p[37];
-        if (ssid_len > 0 && ssid_len <= 32 && len >= (int)(38 + ssid_len)) {
-            uint8_t idx = ssid_table_idx % 16;
-            memset(ssid_table[idx].ssid, 0, 33);
-            memcpy(ssid_table[idx].ssid, &p[38], ssid_len);
-            memcpy(ssid_table[idx].bssid, bssid, 6);
-            ssid_table_idx++;
-        }
-    }
+    safe_serial_println();
+    safe_serial_println("╔══════════════════════════════════════════════════════╗");
+    safe_serial_println("║      ESP32 802.11 Interactive Sniffer — HELP         ║");
+    safe_serial_println("╠══════════════════════════════════════════════════════╣");
+    safe_serial_println("║ CONTROL                                               ║");
+    safe_serial_println("║  .start          Resume sniffing                      ║");
+    safe_serial_println("║  .stop           Pause sniffing (stats preserved)     ║");
+    safe_serial_println("║  .stats          Show packet counters                 ║");
+    safe_serial_println("║  .reset          Reset all counters to zero           ║");
+    safe_serial_println("║  .clear          Clear screen                         ║");
+    safe_serial_println("╠══════════════════════════════════════════════════════╣");
+    safe_serial_println("║ CHANNEL                                               ║");
+    safe_serial_println("║  .channel <1-14> Lock to specific channel             ║");
+    safe_serial_println("║  .hop            Start channel hopping (1-13, fast)  ║");
+    safe_serial_println("║  .hop stop       Stop hopping                         ║");
+    safe_serial_println("╠══════════════════════════════════════════════════════╣");
+    safe_serial_println("║ FILTERING                                             ║");
+    safe_serial_println("║  .filter all     Show all 802.11 frames               ║");
+    safe_serial_println("║  .filter mgmt    Only management frames               ║");
+    safe_serial_println("║  .filter data    Only data frames                     ║");
+    safe_serial_println("║  .filter ctrl    Only control frames                  ║");
+    safe_serial_println("║  .filter deauth  Only Deauth frames (attack detector) ║");
+    safe_serial_println("║  .filter disassoc  Only Disassoc frames               ║");
+    safe_serial_println("║  .filter probe   Only Probe Req/Resp frames           ║");
+    safe_serial_println("║  .filter beacon  Only Beacon frames (AP discovery)    ║");
+    safe_serial_println("║  .filter eapol   Only EAPOL/WPA handshake frames      ║");
+    safe_serial_println("║  .listen <type>  Alias for .filter                    ║");
+    safe_serial_println("╠══════════════════════════════════════════════════════╣");
+    safe_serial_println("║ TARGET LOCKING                                        ║");
+    safe_serial_println("║  .lock-target <BSSID>    Lock to AP by MAC            ║");
+    safe_serial_println("║     e.g: .lock-target AA:BB:CC:DD:EE:FF               ║");
+    safe_serial_println("║  .lock-target <SSID>     Lock to AP by name           ║");
+    safe_serial_println("║     e.g: .lock-target MyHomeWifi                      ║");
+    safe_serial_println("║     (requires beacon to be seen first)                ║");
+    safe_serial_println("║  .unlock         Remove target lock (show all)        ║");
+    safe_serial_println("╠══════════════════════════════════════════════════════╣");
+    safe_serial_println("║ RECORDING                                             ║");
+    safe_serial_println("║  .rec            Start raw hex frame recording        ║");
+    safe_serial_println("║     Output: REC[n] len=X: <hex bytes>                 ║");
+    safe_serial_println("║     Copy to host and decode with: text2pcap or        ║");
+    safe_serial_println("║     pipe to scapy for live analysis                   ║");
+    safe_serial_println("║  .stoprec        Stop recording                       ║");
+    safe_serial_println("╠══════════════════════════════════════════════════════╣");
+    safe_serial_println("║ TIPS                                                  ║");
+    safe_serial_println("║  - Set .filter deauth + .hop to detect deauth attacks ║");
+    safe_serial_println("║    across ALL channels in real time                   ║");
+    safe_serial_println("║  - Set .filter eapol on target channel to catch       ║");
+    safe_serial_println("║    WPA handshakes while running airmon-inject         ║");
+    safe_serial_println("║  - .rec + .lock-target dumps raw frames for offline   ║");
+    safe_serial_println("║    analysis with Wireshark                            ║");
+    safe_serial_println("║  - EAPOL frames marked *** are WPA 4-way handshakes  ║");
+    safe_serial_println("║  - Heartbeat prints every 5s with live stats          ║");
+    safe_serial_println("╚══════════════════════════════════════════════════════╝");
+    safe_serial_println();
 }
 
 // ─── Command Parser ───────────────────────────────────────────────────────────
 void handle_command(String &cmd) {
-    // Strip \r, \n, and any non-printable/non-ASCII garbage (including bracketed
-    // paste escape sequences and trailing quote chars from terminal echo loops)
+    // Strip \r, \n, and any non-printable/non-ASCII garbage
     String clean = "";
     for (int i = 0; i < (int)cmd.length(); i++) {
         char c = cmd[i];
-        if (c >= 0x20 && c < 0x7F) clean += c;  // printable ASCII only
+        if (c >= 0x20 && c < 0x7F) clean += c;
     }
     clean.trim();
     cmd = clean;
 
-    // Echo back what we received so user can see their input
+    // Echo back clean input so user has feedback
     if (cmd.length() > 0) {
-        Serial.printf(">> %s\n", cmd.c_str());
+        safe_serial_printf(">> %s\n", cmd.c_str());
     }
 
     if (cmd.length() == 0) return;
@@ -331,7 +384,7 @@ void handle_command(String &cmd) {
     // .start
     if (cmd == ".start") {
         sniffing = true;
-        Serial.printf("[CMD] Sniffing STARTED | CH:%d | Filter:%s\n",
+        safe_serial_printf("[CMD] Sniffing STARTED | CH:%d | Filter:%s\n",
             current_channel, filter_name());
         return;
     }
@@ -339,13 +392,13 @@ void handle_command(String &cmd) {
     // .stop
     if (cmd == ".stop") {
         sniffing = false;
-        Serial.println("[CMD] Sniffing PAUSED. Send .start to resume.");
+        safe_serial_println("[CMD] Sniffing PAUSED. Send .start to resume.");
         return;
     }
 
     // .clear
     if (cmd == ".clear") {
-        Serial.print("\033[2J\033[H");
+        safe_serial_print("\033[2J\033[H");
         return;
     }
 
@@ -354,26 +407,26 @@ void handle_command(String &cmd) {
         pkt_total = pkt_mgmt = pkt_data = pkt_ctrl = 0;
         pkt_deauth = pkt_disassoc = pkt_probe_req = pkt_probe_resp = 0;
         pkt_beacon = pkt_eapol = pkt_recorded = 0;
-        Serial.println("[CMD] All counters reset.");
+        safe_serial_println("[CMD] All counters reset.");
         return;
     }
 
     // .stats
     if (cmd == ".stats") {
-        Serial.println();
-        Serial.println("┌─ ESP32 Sniffer Stats ──────────────────────────┐");
-        Serial.printf( "│  Channel  : %-3d %s                            \n", current_channel, hopping?"(HOPPING)":"(LOCKED) ");
-        Serial.printf( "│  Filter   : %-10s                             \n", filter_name());
-        Serial.printf( "│  Target   : %-32s      \n", target_locked ? target_label : "(none — show all)");
-        Serial.printf( "│  Sniffing : %s                                  \n", sniffing?"YES":"PAUSED");
-        Serial.printf( "│  Recording: %s                                  \n", recording?"YES":"NO");
-        Serial.println("├─────────────────────────────────────────────────┤");
-        Serial.printf( "│  Total Pkts  : %u\n", pkt_total);
-        Serial.printf( "│  Mgmt        : %u  |  Data : %u  |  Ctrl : %u\n", pkt_mgmt, pkt_data, pkt_ctrl);
-        Serial.printf( "│  Deauths     : %u  |  Disassoc: %u\n", pkt_deauth, pkt_disassoc);
-        Serial.printf( "│  Probe Req   : %u  |  Beacons : %u\n", pkt_probe_req, pkt_beacon);
-        Serial.printf( "│  EAPOL/WPA   : %u  |  Recorded: %u\n", pkt_eapol, pkt_recorded);
-        Serial.println("└─────────────────────────────────────────────────┘");
+        safe_serial_println();
+        safe_serial_println("┌─ ESP32 Sniffer Stats ──────────────────────────┐");
+        safe_serial_printf( "│  Channel  : %-3d %s                            \n", current_channel, hopping?"(HOPPING)":"(LOCKED) ");
+        safe_serial_printf( "│  Filter   : %-10s                             \n", filter_name());
+        safe_serial_printf( "│  Target   : %-32s      \n", target_locked ? target_label : "(none — show all)");
+        safe_serial_printf( "│  Sniffing : %s                                  \n", sniffing?"YES":"PAUSED");
+        safe_serial_printf( "│  Recording: %s                                  \n", recording?"YES":"NO");
+        safe_serial_println("├─────────────────────────────────────────────────┤");
+        safe_serial_printf( "│  Total Pkts  : %u\n", pkt_total);
+        safe_serial_printf( "│  Mgmt        : %u  |  Data : %u  |  Ctrl : %u\n", pkt_mgmt, pkt_data, pkt_ctrl);
+        safe_serial_printf( "│  Deauths     : %u  |  Disassoc: %u\n", pkt_deauth, pkt_disassoc);
+        safe_serial_printf( "│  Probe Req   : %u  |  Beacons : %u\n", pkt_probe_req, pkt_beacon);
+        safe_serial_printf( "│  EAPOL/WPA   : %u  |  Recorded: %u\n", pkt_eapol, pkt_recorded);
+        safe_serial_println("└─────────────────────────────────────────────────┘");
         return;
     }
 
@@ -383,9 +436,9 @@ void handle_command(String &cmd) {
         if (ch >= 1 && ch <= 14) {
             hopping = false;
             set_channel(ch);
-            Serial.printf("[CMD] Locked to Channel %d\n", ch);
+            safe_serial_printf("[CMD] Locked to Channel %d\n", ch);
         } else {
-            Serial.println("[ERR] Channel must be 1-14");
+            safe_serial_println("[ERR] Channel must be 1-14");
         }
         return;
     }
@@ -393,14 +446,14 @@ void handle_command(String &cmd) {
     // .hop stop
     if (cmd == ".hop stop") {
         hopping = false;
-        Serial.println("[CMD] Channel hopping STOPPED.");
+        safe_serial_println("[CMD] Channel hopping STOPPED.");
         return;
     }
 
     // .hop
     if (cmd == ".hop") {
         hopping = true;
-        Serial.println("[CMD] Channel hopping STARTED (1-13, 120ms/ch).");
+        safe_serial_println("[CMD] Channel hopping STARTED (1-13, 120ms/ch).");
         return;
     }
 
@@ -419,8 +472,8 @@ void handle_command(String &cmd) {
         else if (filter_cmd == "beacon")   filter_mode = FILTER_BEACON;
         else if (filter_cmd == "eapol")    filter_mode = FILTER_EAPOL;
         else if (filter_cmd == "disassoc") filter_mode = FILTER_DISASSOC;
-        else { Serial.printf("[ERR] Unknown filter: %s — use .help\n", filter_cmd.c_str()); return; }
-        Serial.printf("[CMD] Filter set to: %s\n", filter_name());
+        else { safe_serial_printf("[ERR] Unknown filter: %s — use .help\n", filter_cmd.c_str()); return; }
+        safe_serial_printf("[CMD] Filter set to: %s\n", filter_name());
         return;
     }
 
@@ -429,7 +482,7 @@ void handle_command(String &cmd) {
         target_locked = false;
         memset(target_bssid, 0, 6);
         memset(target_label, 0, 64);
-        Serial.println("[CMD] Target lock removed. Showing all traffic.");
+        safe_serial_println("[CMD] Target lock removed. Showing all traffic.");
         return;
     }
 
@@ -443,7 +496,7 @@ void handle_command(String &cmd) {
             memcpy(target_bssid, mac, 6);
             target_locked = true;
             snprintf(target_label, 64, "%s", arg.c_str());
-            Serial.printf("[CMD] Locked to BSSID: %s\n", target_label);
+            safe_serial_printf("[CMD] Locked to BSSID: %s\n", target_label);
         } else {
             // SSID lookup from beacon table
             bool found = false;
@@ -453,15 +506,15 @@ void handle_command(String &cmd) {
                     target_locked = true;
                     snprintf(target_label, 64, "%s", arg.c_str());
                     char bs[18]; mac_str(target_bssid, bs);
-                    Serial.printf("[CMD] Locked to SSID \"%s\" -> BSSID %s\n", arg.c_str(), bs);
+                    safe_serial_printf("[CMD] Locked to SSID \"%s\" -> BSSID %s\n", arg.c_str(), bs);
                     found = true;
                     break;
                 }
             }
             if (!found) {
-                Serial.printf("[WARN] SSID \"%s\" not seen yet.\n", arg.c_str());
-                Serial.println("       Run .filter beacon + .hop to scan for it first,");
-                Serial.println("       then retry .lock-target once it appears.");
+                safe_serial_printf("[WARN] SSID \"%s\" not seen yet.\n", arg.c_str());
+                safe_serial_println("       Run .filter beacon + .hop to scan for it first,");
+                safe_serial_println("       then retry .lock-target once it appears.");
             }
         }
         return;
@@ -471,31 +524,32 @@ void handle_command(String &cmd) {
     if (cmd == ".rec") {
         recording = true;
         pkt_recorded = 0;
-        Serial.println("[CMD] Recording STARTED. Raw hex appended after each matching frame.");
-        Serial.println("      Copy REC[n] lines to host, strip prefix, use text2pcap to decode.");
+        safe_serial_println("[CMD] Recording STARTED. Raw hex appended after each matching frame.");
+        safe_serial_println("      Copy REC[n] lines to host, strip prefix, use text2pcap to decode.");
         return;
     }
 
     // .stoprec
     if (cmd == ".stoprec") {
         recording = false;
-        Serial.printf("[CMD] Recording STOPPED. %u frames captured.\n", pkt_recorded);
+        safe_serial_printf("[CMD] Recording STOPPED. %u frames captured.\n", pkt_recorded);
         return;
     }
 
-    Serial.printf("[ERR] Unknown command: '%s' — send .help\n", cmd.c_str());
+    safe_serial_printf("[ERR] Unknown command: '%s' — send .help\n", cmd.c_str());
 }
 
 // ─── Setup ────────────────────────────────────────────────────────────────────
 void setup() {
     Serial.begin(115200);
+    serial_mutex = xSemaphoreCreateMutex();
     delay(800);
-    Serial.println();
-    Serial.println("╔══════════════════════════════════════════════════════╗");
-    Serial.println("║   ESP32 802.11 Interactive Sniffer  v2.0             ║");
-    Serial.println("║   RMX3171 / MT6768 Ground Truth Engine               ║");
-    Serial.println("║   Send .help for command reference                   ║");
-    Serial.println("╚══════════════════════════════════════════════════════╝");
+    safe_serial_println();
+    safe_serial_println("╔══════════════════════════════════════════════════════╗");
+    safe_serial_println("║   ESP32 802.11 Interactive Sniffer  v2.1             ║");
+    safe_serial_println("║   RMX3171 / MT6768 Ground Truth Engine               ║");
+    safe_serial_println("║   Send .help for command reference                   ║");
+    safe_serial_println("╚══════════════════════════════════════════════════════╝");
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
@@ -507,16 +561,30 @@ void setup() {
     esp_wifi_set_promiscuous(true);
     set_channel(current_channel);
 
-    Serial.printf("[ESP32] Ready on Channel %d | Filter: ALL | .help for commands\n\n",
+    safe_serial_printf("[ESP32] Ready on Channel %d | Filter: ALL | .help for commands\n\n",
         current_channel);
 }
 
 // ─── Loop ─────────────────────────────────────────────────────────────────────
+static char cmd_in_buf[128];
+static uint8_t cmd_in_pos = 0;
+
 void loop() {
-    // Serial command input
-    if (Serial.available()) {
-        String input = Serial.readStringUntil('\n');
-        handle_command(input);
+    // Non-blocking serial command input (instant response, zero 1000ms timeouts)
+    while (Serial.available()) {
+        char c = (char)Serial.read();
+        if (c == '\r' || c == '\n') {
+            if (cmd_in_pos > 0) {
+                cmd_in_buf[cmd_in_pos] = '\0';
+                String cmd = String(cmd_in_buf);
+                cmd_in_pos = 0;
+                handle_command(cmd);
+            }
+        } else if (c >= 0x20 && c < 0x7F) {
+            if (cmd_in_pos < sizeof(cmd_in_buf) - 1) {
+                cmd_in_buf[cmd_in_pos++] = c;
+            }
+        }
     }
 
     // Channel hopper
@@ -526,16 +594,15 @@ void loop() {
         hop_idx++;
     }
 
-    // Heartbeat
     // Heartbeat: every 5s while sniffing, every 15s when paused (less spam)
     unsigned long hb_interval = sniffing ? 5000 : 15000;
     if (millis() - last_hb > hb_interval) {
         last_hb = millis();
-        Serial.printf("[HB] CH:%d%s | Filter:%-8s | Total:%u | Deauth:%u | EAPOL:%u | %s\n",
+        safe_serial_printf("[HB] CH:%d%s | Filter:%-8s | Total:%u | Deauth:%u | EAPOL:%u | %s\n",
             current_channel, hopping?"(HOP)":"     ",
             filter_name(), pkt_total, pkt_deauth, pkt_eapol,
             sniffing ? "SNIFFING" : "PAUSED");
-        if (!sniffing) Serial.println("     Send .start to resume sniffing.");
+        if (!sniffing) safe_serial_println("     Send .start to resume sniffing.");
     }
 
     delay(5);
