@@ -69,11 +69,6 @@ static void mac_str(const uint8_t *m, char *out) {
 
 static bool mac_matches_target(const uint8_t *da, const uint8_t *sa, const uint8_t *bssid) {
     if (!target_locked) return true;
-    for (int i = 0; i < 6; i++) {
-        if (target_bssid[i] != 0) goto check;
-    }
-    return true;
-check:
     return (memcmp(da, target_bssid, 6) == 0 ||
             memcmp(sa, target_bssid, 6) == 0 ||
             memcmp(bssid, target_bssid, 6) == 0);
@@ -105,6 +100,9 @@ static const char *filter_name() {
 }
 
 // ─── Sniffer Callback ─────────────────────────────────────────────────────────
+// Forward declaration
+void populate_ssid_table(const uint8_t *p, int len, const uint8_t *bssid);
+
 void sniffer_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (!sniffing) return;
 
@@ -149,7 +147,7 @@ void sniffer_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
 
     if (is_deauth) { pkt_deauth++; }
     if (is_disassoc) { pkt_disassoc++; }
-    if (is_beacon) { pkt_beacon++; }
+    if (is_beacon) { pkt_beacon++; populate_ssid_table(p, len, bssid); }
     if (is_probe_req || is_probe_resp) { pkt_probe_req++; }
     if (is_eapol) { pkt_eapol++; }
 
@@ -291,7 +289,7 @@ struct ssid_entry { char ssid[33]; uint8_t bssid[6]; };
 static ssid_entry ssid_table[16];
 static uint8_t ssid_table_idx = 0;
 
-// Called from sniffer — also populate SSID table from beacons
+// Populate SSID->BSSID lookup table from beacons (called from sniffer_callback)
 void populate_ssid_table(const uint8_t *p, int len, const uint8_t *bssid) {
     if (len >= 38 && p[36] == 0x00) {
         uint8_t ssid_len = p[37];
@@ -307,7 +305,21 @@ void populate_ssid_table(const uint8_t *p, int len, const uint8_t *bssid) {
 
 // ─── Command Parser ───────────────────────────────────────────────────────────
 void handle_command(String &cmd) {
-    cmd.trim();
+    // Strip \r, \n, and any non-printable/non-ASCII garbage (including bracketed
+    // paste escape sequences and trailing quote chars from terminal echo loops)
+    String clean = "";
+    for (int i = 0; i < (int)cmd.length(); i++) {
+        char c = cmd[i];
+        if (c >= 0x20 && c < 0x7F) clean += c;  // printable ASCII only
+    }
+    clean.trim();
+    cmd = clean;
+
+    // Echo back what we received so user can see their input
+    if (cmd.length() > 0) {
+        Serial.printf(">> %s\n", cmd.c_str());
+    }
+
     if (cmd.length() == 0) return;
 
     // .help
@@ -515,12 +527,15 @@ void loop() {
     }
 
     // Heartbeat
-    if (millis() - last_hb > 5000) {
+    // Heartbeat: every 5s while sniffing, every 15s when paused (less spam)
+    unsigned long hb_interval = sniffing ? 5000 : 15000;
+    if (millis() - last_hb > hb_interval) {
         last_hb = millis();
         Serial.printf("[HB] CH:%d%s | Filter:%-8s | Total:%u | Deauth:%u | EAPOL:%u | %s\n",
             current_channel, hopping?"(HOP)":"     ",
             filter_name(), pkt_total, pkt_deauth, pkt_eapol,
             sniffing ? "SNIFFING" : "PAUSED");
+        if (!sniffing) Serial.println("     Send .start to resume sniffing.");
     }
 
     delay(5);
